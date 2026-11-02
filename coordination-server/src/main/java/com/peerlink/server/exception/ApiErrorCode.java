@@ -1,0 +1,19 @@
+package com.peerlink.server.exception;
+
+/** Stable, machine-readable error identifiers returned in the {@code code} field of API errors. */
+public enum ApiErrorCode {
+    VALIDATION_FAILED,
+    USERNAME_TAKEN,
+    EMAIL_TAKEN,
+    INVALID_CREDENTIALS,
+    ACCOUNT_DISABLED,
+    UNAUTHENTICATED,
+    FORBIDDEN,
+    CSRF_TOKEN_INVALID,
+    PEER_NOT_FOUND,
+    DEVICE_NAME_TAKEN,
+    CONNECTION_TICKET_INVALID,
+    CONNECTION_NOT_FOUND,
+    OUTCOME_ALREADY_REPORTED,
+    INTERNAL_ERROR
+}

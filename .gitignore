@@ -42,4 +42,4 @@ hs_err_pid*.log
 replay_pid*.log
 
 # Local peer agent data used during development
-PeerLink/
+/PeerLink/
