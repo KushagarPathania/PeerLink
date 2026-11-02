@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/layout :: head('Sign in')}"></head>
+<body class="d-flex flex-column">
+<nav th:replace="~{fragments/layout :: navbar}"></nav>
+
+<main class="container py-5 flex-grow-1">
+    <div class="auth-card card shadow-sm mx-auto">
+        <div class="card-body p-4 p-md-5">
+            <h1 class="h4 mb-1">Sign in</h1>
+            <p class="text-body-secondary mb-4">Welcome back to PeerLink.</p>
+
+            <div th:if="${param.registered}" class="alert alert-success" role="status">
+                Your account has been created. Please sign in.
+            </div>
+            <div th:if="${param.logout}" class="alert alert-info" role="status">
+                You have been signed out.
+            </div>
+            <div th:if="${param.error}" class="alert alert-danger" role="alert">
+                Invalid username/email or password.
+            </div>
+            <div th:if="${param.disabled}" class="alert alert-warning" role="alert">
+                This account is disabled. Contact an administrator if you think this is a mistake.
+            </div>
+
+            <form th:action="@{/login}" method="post">
+                <div class="mb-3">
+                    <label for="username" class="form-label">Username or email</label>
+                    <input type="text" class="form-control" id="username" name="username"
+                           autocomplete="username" required autofocus maxlength="254">
+                </div>
+                <div class="mb-4">
+                    <label for="password" class="form-label">Password</label>
+                    <div class="input-group">
+                        <input type="password" class="form-control" id="password" name="password"
+                               autocomplete="current-password" required maxlength="255">
+                        <button type="button" class="btn btn-outline-secondary" data-password-toggle
+                                aria-controls="password" aria-pressed="false" aria-label="Show password">Show</button>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary w-100">Sign in</button>
+            </form>
+
+            <p class="text-center small mt-4 mb-0">
+                New to PeerLink? <a th:href="@{/register}">Create an account</a>
+            </p>
+        </div>
+    </div>
+</main>
+
+<footer th:replace="~{fragments/layout :: footer}"></footer>
+<th:block th:replace="~{fragments/layout :: scripts}"></th:block>
+</body>
+</html>

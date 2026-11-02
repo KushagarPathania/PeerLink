@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/layout :: head('Dashboard')}"></head>
+<body class="d-flex flex-column">
+<nav th:replace="~{fragments/layout :: navbar}"></nav>
+
+<main class="container py-5 flex-grow-1">
+    <h1 class="h3 mb-1">Welcome, <span th:text="${account.displayName ?: account.username}">user</span></h1>
+    <p class="text-body-secondary mb-4">This is your PeerLink account.</p>
+
+    <div class="row g-4">
+        <div class="col-lg-4">
+            <div class="card shadow-sm h-100">
+                <div class="card-body">
+                    <h2 class="h5 mb-3">Account details</h2>
+                    <dl class="row mb-0 account-details">
+                        <dt class="col-sm-5 col-lg-12">Display name</dt>
+                        <dd class="col-sm-7 col-lg-12" th:text="${account.displayName ?: '—'}">Name</dd>
+                        <dt class="col-sm-5 col-lg-12">Username</dt>
+                        <dd class="col-sm-7 col-lg-12" th:text="${account.username}">username</dd>
+                        <dt class="col-sm-5 col-lg-12">Email</dt>
+                        <dd class="col-sm-7 col-lg-12 text-break" th:text="${account.email}">email</dd>
+                        <dt class="col-sm-5 col-lg-12">Member since</dt>
+                        <dd class="col-sm-7 col-lg-12" th:text="${memberSince}">date</dd>
+                        <dt class="col-sm-5 col-lg-12">Status</dt>
+                        <dd class="col-sm-7 col-lg-12">
+                            <span class="badge" th:classappend="${account.enabled} ? 'text-bg-success' : 'text-bg-secondary'"
+                                  th:text="${account.enabled} ? 'Active' : 'Disabled'">Active</span>
+                        </dd>
+                    </dl>
+                    <form th:action="@{/logout}" method="post" class="mt-3">
+                        <button type="submit" class="btn btn-outline-danger btn-sm">Sign out</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-8">
+            <section class="card shadow-sm h-100" aria-labelledby="devicesHeading">
+                <div class="card-body">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                        <h2 id="devicesHeading" class="h5 mb-0">Your devices</h2>
+                        <button class="btn btn-primary btn-sm" type="button" data-bs-toggle="collapse"
+                                data-bs-target="#registerDevice" aria-expanded="false" aria-controls="registerDevice">
+                            Add a device
+                        </button>
+                    </div>
+
+                    <div class="collapse" id="registerDevice">
+                        <form id="registerDeviceForm" class="border rounded p-3 mb-3 bg-body-tertiary" novalidate>
+                            <div class="row g-2 align-items-end">
+                                <div class="col-sm-6">
+                                    <label for="deviceName" class="form-label">Device name</label>
+                                    <input type="text" class="form-control" id="deviceName" name="deviceName"
+                                           required maxlength="100" placeholder="e.g. work-laptop">
+                                    <div class="invalid-feedback" data-error-for="deviceName"></div>
+                                </div>
+                                <div class="col-sm-3">
+                                    <label for="listeningPort" class="form-label">Agent port</label>
+                                    <input type="number" class="form-control" id="listeningPort" name="listeningPort"
+                                           required min="1" max="65535" value="9090">
+                                    <div class="invalid-feedback" data-error-for="listeningPort"></div>
+                                </div>
+                                <div class="col-sm-3 d-grid">
+                                    <button type="submit" class="btn btn-primary">Register</button>
+                                </div>
+                            </div>
+                            <div class="alert alert-danger mt-3 mb-0 d-none" id="registerError" role="alert"></div>
+                        </form>
+                    </div>
+
+                    <div id="credentialPanel" class="alert alert-warning d-none" role="status" aria-live="polite">
+                        <h3 class="h6">Connect the peer agent on <span data-field="deviceName"></span></h3>
+                        <p class="small mb-2">
+                            This agent credential is shown <strong>only once</strong>. Store it on that device;
+                            PeerLink keeps only a fingerprint of it. The device stays offline until its agent sends
+                            the first heartbeat.
+                        </p>
+                        <label for="credentialValue" class="form-label small mb-1">Agent credential</label>
+                        <div class="input-group input-group-sm mb-2">
+                            <input type="text" class="form-control font-monospace" id="credentialValue" readonly>
+                            <button class="btn btn-outline-secondary" type="button" id="copyCredential">Copy</button>
+                        </div>
+                        <p class="small mb-1">Then start the agent on that device:</p>
+                        <pre class="agent-command small mb-2"><code id="agentCommand"></code></pre>
+                        <button class="btn btn-sm btn-outline-dark" type="button" id="dismissCredential">
+                            I have stored it
+                        </button>
+                    </div>
+
+                    <div id="devicesStatus" class="text-body-secondary small" role="status">Loading your devices…</div>
+                    <div class="table-responsive">
+                        <table class="table align-middle mb-0 d-none" id="devicesTable">
+                            <thead>
+                            <tr>
+                                <th scope="col">Device</th>
+                                <th scope="col">Status</th>
+                                <th scope="col">Last heartbeat</th>
+                                <th scope="col">Address</th>
+                                <th scope="col">Agent credential</th>
+                                <th scope="col"><span class="visually-hidden">Actions</span></th>
+                            </tr>
+                            </thead>
+                            <tbody id="devicesBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <div class="col-12">
+            <section class="card shadow-sm" aria-labelledby="onlineHeading">
+                <div class="card-body">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                        <h2 id="onlineHeading" class="h5 mb-0">Online peers</h2>
+                        <button class="btn btn-outline-secondary btn-sm" type="button" id="refreshOnline">Refresh</button>
+                    </div>
+                    <p class="small text-body-secondary">
+                        Devices of other users that sent a heartbeat recently. Online does not guarantee that a
+                        direct connection will succeed (firewalls and different networks can block it).
+                        Sending files to a peer will be added in an upcoming release.
+                    </p>
+                    <div id="onlineStatus" class="text-body-secondary small" role="status">Loading online peers…</div>
+                    <ul class="list-group list-group-flush d-none" id="onlineList"></ul>
+                </div>
+            </section>
+        </div>
+    </div>
+</main>
+
+<footer th:replace="~{fragments/layout :: footer}"></footer>
+<th:block th:replace="~{fragments/layout :: scripts}"></th:block>
+<script th:src="@{/js/dashboard.js}"></script>
+</body>
+</html>

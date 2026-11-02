@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/layout :: head('Error')}"></head>
+<body class="d-flex flex-column">
+<nav th:replace="~{fragments/layout :: navbar}"></nav>
+
+<!-- Shows only the status; exception messages and stack traces are never rendered. -->
+<main class="container py-5 flex-grow-1 text-center">
+    <p class="display-4 fw-semibold mb-2" th:text="${status}">500</p>
+    <h1 class="h4 mb-3" th:text="${error}">Error</h1>
+    <p class="text-body-secondary mb-4" th:switch="${status}">
+        <span th:case="404">The page you were looking for does not exist.</span>
+        <span th:case="403">You do not have permission to view this page.</span>
+        <span th:case="401">Please sign in to continue.</span>
+        <span th:case="*">Something went wrong on our side. Please try again.</span>
+    </p>
+    <a class="btn btn-primary" th:href="@{/}">Back to home</a>
+</main>
+
+<footer th:replace="~{fragments/layout :: footer}"></footer>
+<th:block th:replace="~{fragments/layout :: scripts}"></th:block>
+</body>
+</html>

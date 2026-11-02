@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/layout :: head('Create account')}"></head>
+<body class="d-flex flex-column">
+<nav th:replace="~{fragments/layout :: navbar}"></nav>
+
+<main class="container py-5 flex-grow-1">
+    <div class="auth-card card shadow-sm mx-auto">
+        <div class="card-body p-4 p-md-5">
+            <h1 class="h4 mb-1">Create your account</h1>
+            <p class="text-body-secondary mb-4">Share files directly with people you trust.</p>
+
+            <div th:if="${#fields.hasErrors('${registration.*}')}" class="alert alert-danger" role="alert">
+                Please correct the highlighted fields.
+            </div>
+
+            <!-- Password inputs are never pre-filled: the server clears them before re-rendering. -->
+            <form th:action="@{/register}" th:object="${registration}" method="post" novalidate>
+                <div class="mb-3">
+                    <label for="username" class="form-label">Username</label>
+                    <input type="text" class="form-control" th:field="*{username}" th:errorclass="is-invalid"
+                           autocomplete="username" required minlength="3" maxlength="32"
+                           aria-describedby="usernameHelp">
+                    <div id="usernameHelp" class="form-text">3–32 characters: letters, digits, '.', '_' or '-'.</div>
+                    <div class="invalid-feedback" th:if="${#fields.hasErrors('username')}" th:errors="*{username}"></div>
+                </div>
+                <div class="mb-3">
+                    <label for="email" class="form-label">Email</label>
+                    <input type="email" class="form-control" th:field="*{email}" th:errorclass="is-invalid"
+                           autocomplete="email" required maxlength="254">
+                    <div class="invalid-feedback" th:if="${#fields.hasErrors('email')}" th:errors="*{email}"></div>
+                </div>
+                <div class="mb-3">
+                    <label for="displayName" class="form-label">Display name</label>
+                    <input type="text" class="form-control" th:field="*{displayName}" th:errorclass="is-invalid"
+                           autocomplete="name" required maxlength="100">
+                    <div class="invalid-feedback" th:if="${#fields.hasErrors('displayName')}"
+                         th:errors="*{displayName}"></div>
+                </div>
+                <div class="mb-3">
+                    <label for="password" class="form-label">Password</label>
+                    <div class="input-group has-validation">
+                        <input type="password" class="form-control" id="password" name="password"
+                               th:classappend="${#fields.hasErrors('password')} ? 'is-invalid'"
+                               autocomplete="new-password" required minlength="12" maxlength="72"
+                               aria-describedby="passwordHelp">
+                        <button type="button" class="btn btn-outline-secondary" data-password-toggle
+                                aria-controls="password" aria-pressed="false" aria-label="Show password">Show</button>
+                        <div class="invalid-feedback" th:if="${#fields.hasErrors('password')}"
+                             th:errors="*{password}"></div>
+                    </div>
+                    <div id="passwordHelp" class="form-text">At least 12 characters. A passphrase works well.</div>
+                </div>
+                <div class="mb-4">
+                    <label for="confirmPassword" class="form-label">Confirm password</label>
+                    <div class="input-group has-validation">
+                        <input type="password" class="form-control" id="confirmPassword" name="confirmPassword"
+                               th:classappend="${#fields.hasErrors('confirmPassword')} ? 'is-invalid'"
+                               autocomplete="new-password" required maxlength="72">
+                        <button type="button" class="btn btn-outline-secondary" data-password-toggle
+                                aria-controls="confirmPassword" aria-pressed="false"
+                                aria-label="Show password">Show</button>
+                        <div class="invalid-feedback" th:if="${#fields.hasErrors('confirmPassword')}"
+                             th:errors="*{confirmPassword}"></div>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary w-100">Create account</button>
+            </form>
+
+            <p class="text-center small mt-4 mb-0">
+                Already have an account? <a th:href="@{/login}">Sign in</a>
+            </p>
+        </div>
+    </div>
+</main>
+
+<footer th:replace="~{fragments/layout :: footer}"></footer>
+<th:block th:replace="~{fragments/layout :: scripts}"></th:block>
+</body>
+</html>

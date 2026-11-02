@@ -1,0 +1,59 @@
+spring:
+  application:
+    name: peerlink-coordination-server
+
+  # All connection settings come from the environment. The password defaults to empty (never a
+  # real value) so a missing DB_PASSWORD fails with the driver's explicit "no password" error.
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/peerlink}
+    username: ${DB_USERNAME:peerlink}
+    password: ${DB_PASSWORD:}
+    hikari:
+      pool-name: peerlink-pool
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      # Fail fast (default is 30s) so requests and the health check don't hang when the DB is down.
+      connection-timeout: 5000
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Flyway owns the schema; Hibernate only verifies that entities match it.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: ${SERVER_PORT:8080}
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+  servlet:
+    session:
+      timeout: ${SESSION_TIMEOUT:30m}
+      # Never put the session id in URLs (no ;jsessionid=... rewriting).
+      tracking-modes: cookie
+      cookie:
+        name: PEERLINK_SESSION
+        http-only: true
+        same-site: lax
+        # Must be true in production, where the app is served over HTTPS only.
+        secure: ${SESSION_COOKIE_SECURE:false}
+
+peerlink:
+  peers:
+    # Agents send a heartbeat this often; a peer is offline once its last heartbeat is older than
+    # stale-timeout (must be at least twice the interval). The sweep marks such peers OFFLINE.
+    heartbeat-interval: ${PEER_HEARTBEAT_INTERVAL:15s}
+    stale-timeout: ${PEER_STALE_TIMEOUT:60s}
+    sweep-interval: ${PEER_SWEEP_INTERVAL:15s}
+    sweep-enabled: ${PEER_SWEEP_ENABLED:true}
+  connections:
+    # How long a direct-connection ticket can be redeemed after it is issued (5s..10m).
+    ticket-ttl: ${PEER_CONNECTION_TICKET_TTL:60s}
