@@ -75,7 +75,7 @@ class CoordinationServerClientTests {
                 "{\"peerId\":\"" + PEER_ID + "\",\"status\":\"ONLINE\",\"observedAddress\":\"192.168.1.20\"}",
                 authorization, method);
 
-        HeartbeatResult result = new CoordinationServerClient(url).sendHeartbeat(PEER_ID, CREDENTIAL, null);
+        HeartbeatResult result = new CoordinationServerClient(url).sendHeartbeat(PEER_ID, CREDENTIAL, null, null);
 
         assertThat(result.outcome()).isEqualTo(Outcome.ACCEPTED);
         assertThat(result.observedAddress()).isEqualTo("192.168.1.20");
@@ -99,7 +99,7 @@ class CoordinationServerClientTests {
         }
 
         HeartbeatResult result = new CoordinationServerClient(URI.create("http://127.0.0.1:" + freePort))
-                .sendHeartbeat(PEER_ID, CREDENTIAL, null);
+                .sendHeartbeat(PEER_ID, CREDENTIAL, null, null);
 
         assertThat(result.outcome()).isEqualTo(Outcome.UNREACHABLE);
     }
@@ -119,7 +119,7 @@ class CoordinationServerClientTests {
                     URI.create("http://127.0.0.1:" + silent.getLocalPort()), Duration.ofMillis(300));
 
             long start = System.nanoTime();
-            HeartbeatResult result = client.sendHeartbeat(PEER_ID, CREDENTIAL, null);
+            HeartbeatResult result = client.sendHeartbeat(PEER_ID, CREDENTIAL, null, null);
             Duration elapsed = Duration.ofNanos(System.nanoTime() - start);
 
             assertThat(result.outcome()).isEqualTo(Outcome.UNREACHABLE);
@@ -131,6 +131,8 @@ class CoordinationServerClientTests {
     private static final UUID TARGET = UUID.fromString("9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d");
     private static final String TICKET = "plt_" + "T".repeat(43);
     private static final String PROOF = "P".repeat(43);
+    private static final String TARGET_CERT = "d".repeat(64);
+    private static final String OWN_CERT = "e".repeat(64);
 
     @Test
     void heartbeatReportsListeningPortInBody() throws IOException {
@@ -143,9 +145,9 @@ class CoordinationServerClientTests {
         });
         server.start();
 
-        new CoordinationServerClient(baseUrl()).sendHeartbeat(PEER_ID, CREDENTIAL, 9444);
+        new CoordinationServerClient(baseUrl()).sendHeartbeat(PEER_ID, CREDENTIAL, 9444, "c".repeat(64));
 
-        assertThat(body.get()).isEqualTo("{\"listeningPort\":9444}");
+        assertThat(body.get()).isEqualTo("{\"listeningPort\":9444,\"tlsCertificateSha256\":\"" + "c".repeat(64) + "\"}");
     }
 
     @Test
@@ -154,9 +156,11 @@ class CoordinationServerClientTests {
         URI url = startServer("/api/peers/" + PEER_ID + "/connections", 201, ticketJson("192.168.1.20"),
                 authorization, new AtomicReference<>());
 
-        IssuedTicket ticket = new CoordinationServerClient(url).requestConnectionTicket(PEER_ID, CREDENTIAL, TARGET);
+        IssuedTicket ticket = new CoordinationServerClient(url).requestConnectionTicket(PEER_ID, CREDENTIAL, TARGET,
+                null, OWN_CERT);
 
         assertThat(ticket.ticket()).isEqualTo(TICKET);
+        assertThat(ticket.targetCertificateSha256()).isEqualTo(TARGET_CERT);
         assertThat(ticket.targetHost()).isEqualTo("192.168.1.20");
         assertThat(ticket.targetPort()).isEqualTo(9191);
         assertThat(ticket.responderProof()).isEqualTo(PROOF);
@@ -169,7 +173,7 @@ class CoordinationServerClientTests {
         URI url = startServer("/api/peers/" + PEER_ID + "/connections", 201, ticketJson("attacker.example.com"),
                 new AtomicReference<>(), new AtomicReference<>());
 
-        assertThatThrownBy(() -> new CoordinationServerClient(url).requestConnectionTicket(PEER_ID, CREDENTIAL, TARGET))
+        assertThatThrownBy(() -> new CoordinationServerClient(url).requestConnectionTicket(PEER_ID, CREDENTIAL, TARGET, null, OWN_CERT))
                 .isInstanceOfSatisfying(TicketException.class,
                         e -> assertThat(e.reason()).isEqualTo(TicketException.Reason.INVALID_RESPONSE));
     }
@@ -182,21 +186,40 @@ class CoordinationServerClientTests {
     }
 
     @Test
+    void redemptionSendsThePresentedTlsCertificate() throws Exception {
+        AtomicReference<String> sent = new AtomicReference<>();
+        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        server.createContext("/", exchange -> {
+            sent.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            exchange.sendResponseHeaders(403, -1);
+            exchange.close();
+        });
+        server.start();
+
+        assertThatThrownBy(() -> new CoordinationServerClient(baseUrl()).redeemConnectionTicket(PEER_ID, CREDENTIAL, TICKET,
+                OWN_CERT)).isInstanceOf(TicketException.class);
+        // The server checks it before consuming the ticket.
+        assertThat(sent.get()).contains("\"presentedCertificateSha256\":\"" + OWN_CERT + "\"");
+    }
+
+    @Test
     void redeemsTicketAndClassifiesRejection() throws Exception {
         String body = "{\"ticketId\":\"" + UUID.randomUUID() + "\",\"sourcePeerId\":\"" + TARGET
                 + "\",\"sourceDeviceName\":\"laptop\",\"sourceOwnerUsername\":\"alice\",\"responderProof\":\""
-                + PROOF + "\"}";
+                + PROOF + "\",\"initiatorCertificateSha256\":\"" + OWN_CERT + "\",\"transferId\":null}";
         URI url = startServer("/api/peers/" + PEER_ID + "/connections/redeem", 200, body,
                 new AtomicReference<>(), new AtomicReference<>());
 
-        VerifiedTicket verified = new CoordinationServerClient(url).redeemConnectionTicket(PEER_ID, CREDENTIAL, TICKET);
+        VerifiedTicket verified = new CoordinationServerClient(url).redeemConnectionTicket(PEER_ID, CREDENTIAL, TICKET, OWN_CERT);
         assertThat(verified.sourcePeerId()).isEqualTo(TARGET);
         assertThat(verified.responderProof()).isEqualTo(PROOF);
+        assertThat(verified.initiatorCertificateSha256()).isEqualTo(OWN_CERT);
+        assertThat(verified.transfer()).isNull();
 
         stopServer();
         URI rejecting = startServer("/api/peers/" + PEER_ID + "/connections/redeem", 403, "{}",
                 new AtomicReference<>(), new AtomicReference<>());
-        assertThatThrownBy(() -> new CoordinationServerClient(rejecting).redeemConnectionTicket(PEER_ID, CREDENTIAL, TICKET))
+        assertThatThrownBy(() -> new CoordinationServerClient(rejecting).redeemConnectionTicket(PEER_ID, CREDENTIAL, TICKET, OWN_CERT))
                 .isInstanceOfSatisfying(TicketException.class,
                         e -> assertThat(e.reason()).isEqualTo(TicketException.Reason.INVALID_TICKET));
     }
@@ -205,7 +228,7 @@ class CoordinationServerClientTests {
     void malformedTicketIsNeverSentToTheServer() {
         CoordinationServerClient client = new CoordinationServerClient(URI.create("http://127.0.0.1:1"));
 
-        assertThatThrownBy(() -> client.redeemConnectionTicket(PEER_ID, CREDENTIAL, "plt_\"},\"x\":\""))
+        assertThatThrownBy(() -> client.redeemConnectionTicket(PEER_ID, CREDENTIAL, "plt_\"},\"x\":\"", OWN_CERT))
                 .isInstanceOfSatisfying(TicketException.class,
                         e -> assertThat(e.reason()).isEqualTo(TicketException.Reason.INVALID_TICKET));
     }
@@ -224,14 +247,15 @@ class CoordinationServerClientTests {
         stopServer();
         URI url = startServer("/api/peers/" + PEER_ID + "/connections", status, "{}",
                 new AtomicReference<>(), new AtomicReference<>());
-        assertThatThrownBy(() -> new CoordinationServerClient(url).requestConnectionTicket(PEER_ID, CREDENTIAL, TARGET))
+        assertThatThrownBy(() -> new CoordinationServerClient(url).requestConnectionTicket(PEER_ID, CREDENTIAL, TARGET, null, OWN_CERT))
                 .isInstanceOfSatisfying(TicketException.class, e -> assertThat(e.reason()).isEqualTo(reason));
     }
 
     private static String ticketJson(String host) {
         return "{\"ticketId\":\"" + UUID.randomUUID() + "\",\"ticket\":\"" + TICKET + "\",\"sourcePeerId\":\""
                 + PEER_ID + "\",\"targetPeerId\":\"" + TARGET + "\",\"targetHost\":\"" + host
-                + "\",\"targetPort\":9191,\"expiresAt\":\"2026-11-02T10:00:00Z\",\"responderProof\":\"" + PROOF + "\"}";
+                + "\",\"targetPort\":9191,\"expiresAt\":\"2026-11-02T10:00:00Z\",\"responderProof\":\"" + PROOF
+                + "\",\"targetCertificateSha256\":\"" + TARGET_CERT + "\",\"transferId\":null}";
     }
 
     private URI baseUrl() {
@@ -242,7 +266,7 @@ class CoordinationServerClientTests {
         stopServer();
         URI url = startServer("/api/peers/" + PEER_ID + "/heartbeat", status, "{}", new AtomicReference<>(),
                 new AtomicReference<>());
-        return new CoordinationServerClient(url).sendHeartbeat(PEER_ID, CREDENTIAL, null);
+        return new CoordinationServerClient(url).sendHeartbeat(PEER_ID, CREDENTIAL, null, null);
     }
 
     private URI startServer(String path, int status, String body, AtomicReference<String> authorization,

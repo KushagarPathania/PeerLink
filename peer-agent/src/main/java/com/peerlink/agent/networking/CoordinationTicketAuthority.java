@@ -23,16 +23,20 @@ public final class CoordinationTicketAuthority implements TicketIssuer, TicketVe
     private final CoordinationServerClient client;
     private final UUID selfPeerId;
     private final AgentCredential credential;
+    private final String certificateFingerprint;
 
-    public CoordinationTicketAuthority(CoordinationServerClient client, UUID selfPeerId, AgentCredential credential) {
+    /** @param certificateFingerprint fingerprint of the TLS certificate this agent presents when connecting */
+    public CoordinationTicketAuthority(CoordinationServerClient client, UUID selfPeerId, AgentCredential credential,
+                                       String certificateFingerprint) {
         this.client = Objects.requireNonNull(client);
         this.selfPeerId = Objects.requireNonNull(selfPeerId);
         this.credential = Objects.requireNonNull(credential);
+        this.certificateFingerprint = Objects.requireNonNull(certificateFingerprint);
     }
 
     @Override
-    public IssuedTicket requestTicket(UUID targetPeerId) throws TicketException {
-        return client.requestConnectionTicket(selfPeerId, credential, targetPeerId);
+    public IssuedTicket requestTicket(UUID targetPeerId, UUID transferId) throws TicketException {
+        return client.requestConnectionTicket(selfPeerId, credential, targetPeerId, transferId, certificateFingerprint);
     }
 
     @Override
@@ -43,7 +47,7 @@ public final class CoordinationTicketAuthority implements TicketIssuer, TicketVe
     }
 
     @Override
-    public VerifiedTicket redeem(String ticket) throws TicketException {
-        return client.redeemConnectionTicket(selfPeerId, credential, ticket);
+    public VerifiedTicket redeem(String ticket, String presentedCertificateSha256) throws TicketException {
+        return client.redeemConnectionTicket(selfPeerId, credential, ticket, presentedCertificateSha256);
     }
 }

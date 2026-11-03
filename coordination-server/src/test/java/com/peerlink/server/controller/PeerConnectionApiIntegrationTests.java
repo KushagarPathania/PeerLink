@@ -55,8 +55,12 @@ class PeerConnectionApiIntegrationTests extends WebIntegrationTestSupport {
     private Agent a;
     private Agent b;
 
-    /** A registered peer and its agent credential. */
-    private record Agent(String peerId, String credential) {
+    /** A registered peer, its agent credential and the TLS fingerprint its agent reports. */
+    private record Agent(String peerId, String credential, String certificate) {
+        Agent(String peerId, String credential) {
+            this(peerId, credential, SecretTokens.sha256Hex(peerId));
+        }
+
         UUID id() {
             return UUID.fromString(peerId);
         }
@@ -84,6 +88,7 @@ class PeerConnectionApiIntegrationTests extends WebIntegrationTestSupport {
                 .andExpect(jsonPath("$.targetPeerId").value(b.peerId()))
                 .andExpect(jsonPath("$.targetHost").value("192.168.1.20"))
                 .andExpect(jsonPath("$.targetPort").value(9191))
+                .andExpect(jsonPath("$.targetCertificateSha256").value(b.certificate()))
                 .andReturn().getResponse().getContentAsString().transform(this::readTree);
 
         assertThat(ticket.get("ticket").asText()).matches("plt_[A-Za-z0-9_-]{43}");
@@ -94,6 +99,23 @@ class PeerConnectionApiIntegrationTests extends WebIntegrationTestSupport {
                 "select ticket_hash from connection_tickets where id = ?::uuid", String.class,
                 ticket.get("ticketId").asText());
         assertThat(storedHash).isEqualTo(SecretTokens.sha256Hex(ticket.get("ticket").asText()));
+    }
+
+    @Test
+    void ticketRequestsMustNameTheInitiatorCertificate() throws Exception {
+        mockMvc.perform(post("/api/peers/" + a.peerId() + "/connections").header(HttpHeaders.AUTHORIZATION, bearer(a))
+                        .contentType(MediaType.APPLICATION_JSON).content(json(Map.of("targetPeerId", b.peerId()))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors[0].field").value("initiatorCertificateSha256"));
+    }
+
+    @Test
+    void targetWithoutTlsIdentityCannotBeContacted() throws Exception {
+        JsonNode registration = registration(aliceSession, "no-tls-yet");
+        Agent noTls = new Agent(registration.at("/peer/id").asText(), registration.at("/agentCredential/credential").asText());
+        heartbeat(noTls, "192.168.1.40", Map.of("listeningPort", 9090)).andExpect(status().isOk());
+
+        issue(b, noTls.peerId()).andExpect(status().isNotFound());
     }
 
     @Test
@@ -113,7 +135,7 @@ class PeerConnectionApiIntegrationTests extends WebIntegrationTestSupport {
 
     @Test
     void onlyThePeersOwnAgentMayRequestTickets() throws Exception {
-        String body = json(Map.of("targetPeerId", b.peerId()));
+        String body = json(Map.of("targetPeerId", b.peerId(), "initiatorCertificateSha256", a.certificate()));
         // Signed-in user (session, with CSRF), anonymous, and another peer's credential.
         mockMvc.perform(post("/api/peers/" + a.peerId() + "/connections").session(aliceSession).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON).content(body))
@@ -137,7 +159,9 @@ class PeerConnectionApiIntegrationTests extends WebIntegrationTestSupport {
                 .andExpect(jsonPath("$.ticketId").value(ticket.get("ticketId").asText()))
                 .andExpect(jsonPath("$.sourcePeerId").value(a.peerId()))
                 .andExpect(jsonPath("$.sourceDeviceName").value("alice-laptop"))
-                .andExpect(jsonPath("$.responderProof").value(ticket.get("responderProof").asText()));
+                .andExpect(jsonPath("$.responderProof").value(ticket.get("responderProof").asText()))
+                .andExpect(jsonPath("$.initiatorCertificateSha256").value(a.certificate()))
+                .andExpect(jsonPath("$.transferId").isEmpty());
 
         ConnectionTicket stored = ticketRepository.findById(UUID.fromString(ticket.get("ticketId").asText())).orElseThrow();
         assertThat(stored.getStatus()).isEqualTo(ConnectionTicketStatus.REDEEMED);
@@ -180,7 +204,7 @@ class PeerConnectionApiIntegrationTests extends WebIntegrationTestSupport {
                 .andReturn().getResponse().getContentAsString().transform(this::readTree).get("credential").asText();
         redeem(b, beforeRotation).andExpect(status().isForbidden());
 
-        Agent rotated = new Agent(a.peerId(), newCredential);
+        Agent rotated = new Agent(a.peerId(), newCredential, a.certificate());
         String beforeRevocation = issued(rotated, b).get("ticket").asText();
         mockMvc.perform(delete("/api/peers/" + a.peerId() + "/credential").session(aliceSession).with(csrf()))
                 .andExpect(status().isNoContent());
@@ -196,10 +220,29 @@ class PeerConnectionApiIntegrationTests extends WebIntegrationTestSupport {
                 .andExpect(jsonPath("$.errors[0].field").value("ticket"));
         // B's credential cannot redeem on A's behalf.
         mockMvc.perform(post("/api/peers/" + a.peerId() + "/connections/redeem").header(HttpHeaders.AUTHORIZATION, bearer(b))
-                        .contentType(MediaType.APPLICATION_JSON).content(json(Map.of("ticket", ticket))))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json(Map.of("ticket", ticket, "presentedCertificateSha256", a.certificate()))))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("FORBIDDEN"));
         redeem(b, ticket).andExpect(status().isOk()); // still unused after the rejected attempts above
+    }
+
+    @Test
+    void ticketPresentedWithAnotherTlsCertificateIsRefusedButNotConsumed() throws Exception {
+        String ticket = issued(a, b).get("ticket").asText();
+        String impostorCertificate = SecretTokens.sha256Hex("impostor");
+
+        redeemPresenting(b, ticket, impostorCertificate).andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("CONNECTION_TICKET_INVALID"));
+        redeemPresenting(b, ticket, "not-a-fingerprint").andExpect(status().isBadRequest());
+        mockMvc.perform(post("/api/peers/" + b.peerId() + "/connections/redeem").header(HttpHeaders.AUTHORIZATION, bearer(b))
+                        .contentType(MediaType.APPLICATION_JSON).content(json(Map.of("ticket", ticket))))
+                .andExpect(status().isBadRequest());
+
+        // The legitimate initiator's connection can still use it, exactly once.
+        redeem(b, ticket).andExpect(status().isOk());
+        redeem(b, ticket).andExpect(status().isForbidden());
+        redeemPresenting(b, ticket, impostorCertificate).andExpect(status().isForbidden());
     }
 
     @Test
@@ -214,7 +257,7 @@ class PeerConnectionApiIntegrationTests extends WebIntegrationTestSupport {
             results.add(pool.submit(() -> {
                 start.await();
                 try {
-                    ticketService.redeem(bAgent, b.id(), ticket);
+                    ticketService.redeem(bAgent, b.id(), ticket, a.certificate());
                     return true;
                 } catch (RuntimeException e) {
                     return false;
@@ -271,7 +314,8 @@ class PeerConnectionApiIntegrationTests extends WebIntegrationTestSupport {
         JsonNode registration = registration(session, deviceName);
         Agent agent = new Agent(registration.at("/peer/id").asText(),
                 registration.at("/agentCredential/credential").asText());
-        heartbeat(agent, address, Map.of("listeningPort", port)).andExpect(status().isOk());
+        heartbeat(agent, address, Map.of("listeningPort", port, "tlsCertificateSha256", agent.certificate()))
+                .andExpect(status().isOk());
         return agent;
     }
 
@@ -296,7 +340,8 @@ class PeerConnectionApiIntegrationTests extends WebIntegrationTestSupport {
     private ResultActions issue(Agent source, String targetPeerId) throws Exception {
         return mockMvc.perform(post("/api/peers/" + source.peerId() + "/connections")
                 .header(HttpHeaders.AUTHORIZATION, bearer(source))
-                .contentType(MediaType.APPLICATION_JSON).content(json(Map.of("targetPeerId", targetPeerId))));
+                .contentType(MediaType.APPLICATION_JSON).content(json(Map.of("targetPeerId", targetPeerId,
+                        "initiatorCertificateSha256", source.certificate()))));
     }
 
     private JsonNode issued(Agent source, Agent target) throws Exception {
@@ -307,7 +352,15 @@ class PeerConnectionApiIntegrationTests extends WebIntegrationTestSupport {
     private ResultActions redeem(Agent target, String ticket) throws Exception {
         return mockMvc.perform(post("/api/peers/" + target.peerId() + "/connections/redeem")
                 .header(HttpHeaders.AUTHORIZATION, bearer(target))
-                .contentType(MediaType.APPLICATION_JSON).content(json(Map.of("ticket", ticket))));
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json(Map.of("ticket", ticket, "presentedCertificateSha256", a.certificate()))));
+    }
+
+    private ResultActions redeemPresenting(Agent target, String ticket, String certificate) throws Exception {
+        return mockMvc.perform(post("/api/peers/" + target.peerId() + "/connections/redeem")
+                .header(HttpHeaders.AUTHORIZATION, bearer(target))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json(Map.of("ticket", ticket, "presentedCertificateSha256", certificate))));
     }
 
     private ResultActions reportOutcome(Agent source, String ticketId, String outcome) throws Exception {

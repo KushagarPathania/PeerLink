@@ -38,7 +38,8 @@ public class PeerConnectionApiController {
     public ConnectionTicketResponse requestTicket(@AuthenticationPrincipal PeerAgentPrincipal agent,
                                                   @PathVariable UUID peerId,
                                                   @Valid @RequestBody ConnectionTicketRequest request) {
-        return ticketService.issue(agent, peerId, request.targetPeerId());
+        return ticketService.issue(agent, peerId, request.targetPeerId(), request.transferId(),
+                request.initiatorCertificateSha256());
     }
 
     /** The calling agent (peer {@code peerId}) verifies a ticket a connecting peer presented to it. */
@@ -46,7 +47,7 @@ public class PeerConnectionApiController {
     public TicketRedemptionResponse redeem(@AuthenticationPrincipal PeerAgentPrincipal agent,
                                            @PathVariable UUID peerId,
                                            @Valid @RequestBody TicketRedemptionRequest request) {
-        return ticketService.redeem(agent, peerId, request.ticket());
+        return ticketService.redeem(agent, peerId, request.ticket(), request.presentedCertificateSha256());
     }
 
     @PostMapping("/{ticketId}/outcome")

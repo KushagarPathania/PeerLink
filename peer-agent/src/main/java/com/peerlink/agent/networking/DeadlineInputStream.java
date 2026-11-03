@@ -11,20 +11,20 @@ import java.time.Duration;
  * trickling one byte at a time could hold a connection forever; here every read is limited to the
  * time remaining until the deadline.
  */
-final class DeadlineInputStream extends InputStream {
+public final class DeadlineInputStream extends InputStream {
 
     private final Socket socket;
     private final InputStream in;
     private long deadlineNanos;
 
-    DeadlineInputStream(Socket socket, Duration timeout) throws IOException {
+    public DeadlineInputStream(Socket socket, Duration timeout) throws IOException {
         this.socket = socket;
         this.in = socket.getInputStream();
         extend(timeout);
     }
 
     /** Starts a new deadline {@code timeout} from now. */
-    void extend(Duration timeout) {
+    public void extend(Duration timeout) {
         this.deadlineNanos = System.nanoTime() + timeout.toNanos();
     }
 

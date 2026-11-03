@@ -83,14 +83,15 @@ class HeartbeatLoopTests {
     }
 
     @Test
-    void reportsTheListenerPortWithEveryHeartbeat() throws InterruptedException {
+    void reportsTheListenerPortAndCertificateWithEveryHeartbeat() throws InterruptedException {
         ScriptedClient client = new ScriptedClient(() -> accepted());
         loop = new HeartbeatLoop(client, PEER_ID, CREDENTIAL, INTERVAL, FAST_BACKOFF,
-                Executors.newSingleThreadScheduledExecutor(), 9444);
+                Executors.newSingleThreadScheduledExecutor(), 9444, "a".repeat(64));
         loop.start();
 
         assertThat(client.awaitCalls(2)).isTrue();
         assertThat(client.lastReportedPort).isEqualTo(9444);
+        assertThat(client.lastReportedCertificate).isEqualTo("a".repeat(64));
     }
 
     private HeartbeatLoop start(PresenceClient client) {
@@ -112,6 +113,7 @@ class HeartbeatLoopTests {
         private final AtomicInteger calls = new AtomicInteger();
         private volatile CountDownLatch target = new CountDownLatch(0);
         private volatile Integer lastReportedPort;
+        private volatile String lastReportedCertificate;
 
         ScriptedClient(Supplier<HeartbeatResult> fallback) {
             this.fallback = fallback;
@@ -129,10 +131,12 @@ class HeartbeatLoopTests {
         }
 
         @Override
-        public HeartbeatResult sendHeartbeat(UUID peerId, AgentCredential credential, Integer listeningPort) {
+        public HeartbeatResult sendHeartbeat(UUID peerId, AgentCredential credential, Integer listeningPort,
+                                             String tlsCertificateSha256) {
             Supplier<HeartbeatResult> next;
             synchronized (this) {
                 lastReportedPort = listeningPort;
+                lastReportedCertificate = tlsCertificateSha256;
                 calls.incrementAndGet();
                 target.countDown();
                 next = script.isEmpty() ? fallback : script.poll();

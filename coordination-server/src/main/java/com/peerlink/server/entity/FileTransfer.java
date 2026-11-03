@@ -117,15 +117,28 @@ public class FileTransfer extends BaseEntity {
         this.totalBytes = sharedFile.getFileSizeBytes();
         this.totalChunks = sharedFile.getTotalChunks();
         this.status = TransferStatus.REQUESTED;
-        appendEvent(null, TransferStatus.REQUESTED, null);
+        appendEvent(null, TransferStatus.REQUESTED, null, null);
+    }
+
+    public boolean isActive() {
+        return !status.isTerminal();
     }
 
     public void authorize() {
-        transitionTo(TransferStatus.AUTHORIZED, null);
+        authorize(null);
+    }
+
+    /** The sending peer's agent agreed to serve this transfer (it redeemed a ticket bound to it). */
+    public void authorize(Peer reporter) {
+        transitionTo(TransferStatus.AUTHORIZED, null, reporter);
     }
 
     public void start(Instant now) {
-        transitionTo(TransferStatus.IN_PROGRESS, null);
+        start(now, null);
+    }
+
+    public void start(Instant now, Peer reporter) {
+        transitionTo(TransferStatus.IN_PROGRESS, null, reporter);
         this.startedAt = now;
     }
 
@@ -147,10 +160,14 @@ public class FileTransfer extends BaseEntity {
 
     /** Marks the transfer COMPLETED; only valid after the receiver verified the SHA-256 checksum. */
     public void completeWithVerifiedChecksum(Instant now) {
+        completeWithVerifiedChecksum(now, null);
+    }
+
+    public void completeWithVerifiedChecksum(Instant now, Peer reporter) {
         if (transferredBytes != totalBytes || completedChunks != totalChunks) {
             throw new IllegalStateException("Cannot complete a transfer before all bytes and chunks arrived");
         }
-        transitionTo(TransferStatus.COMPLETED, null);
+        transitionTo(TransferStatus.COMPLETED, null, reporter);
         this.checksumVerified = Boolean.TRUE;
         this.completedAt = now;
     }
@@ -161,28 +178,40 @@ public class FileTransfer extends BaseEntity {
     }
 
     public void fail(TransferErrorCode errorCode, Instant now) {
+        fail(errorCode, now, null);
+    }
+
+    public void fail(TransferErrorCode errorCode, Instant now, Peer reporter) {
         Objects.requireNonNull(errorCode, "errorCode");
-        transitionTo(TransferStatus.FAILED, errorCode);
+        transitionTo(TransferStatus.FAILED, errorCode, reporter);
+        this.errorCode = errorCode;
+        this.completedAt = now;
+    }
+
+    /** A peer declined the transfer before any data was accepted (too large, no space, ...). */
+    public void reject(TransferErrorCode errorCode, Instant now, Peer reporter) {
+        Objects.requireNonNull(errorCode, "errorCode");
+        transitionTo(TransferStatus.REJECTED, errorCode, reporter);
         this.errorCode = errorCode;
         this.completedAt = now;
     }
 
     public void cancel(Instant now) {
-        transitionTo(TransferStatus.CANCELLED, null);
+        transitionTo(TransferStatus.CANCELLED, null, null);
         this.completedAt = now;
     }
 
-    private void transitionTo(TransferStatus next, TransferErrorCode eventErrorCode) {
+    private void transitionTo(TransferStatus next, TransferErrorCode eventErrorCode, Peer reporter) {
         if (!status.canTransitionTo(next)) {
             throw new IllegalStateException("Illegal transfer status transition " + status + " -> " + next);
         }
         TransferStatus previous = status;
         this.status = next;
-        appendEvent(previous, next, eventErrorCode);
+        appendEvent(previous, next, eventErrorCode, reporter);
     }
 
-    private void appendEvent(TransferStatus from, TransferStatus to, TransferErrorCode eventErrorCode) {
-        events.add(new TransferEvent(this, events.size() + 1, from, to, eventErrorCode));
+    private void appendEvent(TransferStatus from, TransferStatus to, TransferErrorCode eventErrorCode, Peer reporter) {
+        events.add(new TransferEvent(this, events.size() + 1, from, to, eventErrorCode, reporter));
     }
 
     public SharedFile getSharedFile() {

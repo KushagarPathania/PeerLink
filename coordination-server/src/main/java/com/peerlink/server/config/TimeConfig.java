@@ -6,7 +6,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
-@EnableConfigurationProperties({PeerPresenceProperties.class, ConnectionProperties.class})
+@EnableConfigurationProperties({PeerPresenceProperties.class, ConnectionProperties.class, TransferProperties.class})
 public class TimeConfig {
 
     /** All server-side timestamps (heartbeats, cut-offs) come from this clock, never from clients. */

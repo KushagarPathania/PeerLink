@@ -5,6 +5,7 @@ import com.peerlink.agent.protocol.Handshake;
 import com.peerlink.agent.protocol.MessageCodec;
 import com.peerlink.agent.protocol.ProtocolConstants;
 import com.peerlink.agent.protocol.RejectReason;
+import com.peerlink.agent.security.PeerTls;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -27,10 +28,12 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.net.ssl.SSLSocket;
 
 /**
- * Accepts incoming peer connections. At most {@code maxConnections} are served at once, each on a
- * thread of a fixed pool; further connections get a REJECT BUSY and are closed. A failing
+ * Accepts incoming peer connections (all of them TLS, see {@link InboundConnectionHandler}). At most
+ * {@code maxConnections} are served at once, each on a thread of a fixed pool; further connections
+ * get a REJECT BUSY and are closed. A failing
  * connection never affects the accept loop. {@link #close()} releases the port and all threads.
  */
 public final class PeerListener implements AutoCloseable {
@@ -57,6 +60,7 @@ public final class PeerListener implements AutoCloseable {
 
     private final Settings settings;
     private final InboundConnectionHandler handler;
+    private final PeerTls tls;
     private final Semaphore permits;
     private final ExecutorService workers;
     private final ThreadPoolExecutor rejector;
@@ -65,9 +69,11 @@ public final class PeerListener implements AutoCloseable {
     private volatile boolean closed;
     private Thread acceptThread;
 
-    public PeerListener(Settings settings, InboundConnectionHandler handler) {
+    /** @param tls used to tell over-limit clients they are refused (all peer traffic is TLS) */
+    public PeerListener(Settings settings, InboundConnectionHandler handler, PeerTls tls) {
         this.settings = Objects.requireNonNull(settings);
         this.handler = Objects.requireNonNull(handler);
+        this.tls = Objects.requireNonNull(tls);
         this.permits = new Semaphore(settings.maxConnections());
         this.workers = Executors.newFixedThreadPool(settings.maxConnections(), named("peerlink-peer-conn"));
         // Busy rejections are written on their own small thread so the accept loop never blocks.
@@ -124,7 +130,7 @@ public final class PeerListener implements AutoCloseable {
             if (rejector.getQueue().remainingCapacity() == 0) {
                 closeQuietly(socket); // too many pending rejections: just drop it
             } else {
-                rejector.execute(() -> rejectBusy(socket));
+                rejector.execute(() -> rejectBusy(tls, socket));
             }
             return;
         }
@@ -155,12 +161,17 @@ public final class PeerListener implements AutoCloseable {
         permits.release();
     }
 
-    /** Tells the client we are busy, then drains its pending bytes so closing does not reset the reply. */
-    private static void rejectBusy(Socket socket) {
-        try (socket) {
+    /**
+     * Tells the client we are busy (over TLS, like all peer traffic), then drains its pending bytes
+     * so closing does not reset the reply. No ticket is read or redeemed.
+     */
+    private static void rejectBusy(PeerTls tls, Socket accepted) {
+        try (accepted) {
+            accepted.setSoTimeout((int) REJECTION_DRAIN.multipliedBy(4).toMillis());
+            SSLSocket socket = tls.serverSide(accepted);
+            socket.startHandshake();
             OutputStream out = socket.getOutputStream();
-            FrameIO.writeFrame(out, MessageCodec.encode(Handshake.reject(RejectReason.BUSY)));
-            socket.shutdownOutput();
+            FrameIO.writeControl(out, MessageCodec.encode(Handshake.reject(RejectReason.BUSY)));
             socket.setSoTimeout((int) REJECTION_DRAIN.toMillis());
             InputStream in = socket.getInputStream();
             byte[] discard = new byte[ProtocolConstants.MAX_FRAME_BYTES];
@@ -188,6 +199,7 @@ public final class PeerListener implements AutoCloseable {
         openSockets.forEach(PeerListener::closeQuietly);
         workers.shutdownNow();
         rejector.shutdownNow();
+        handler.close();
         try {
             if (!workers.awaitTermination(SHUTDOWN_GRACE.toMillis(), TimeUnit.MILLISECONDS)) {
                 LOG.log(Level.WARNING, "Some peer connection workers did not stop in time");

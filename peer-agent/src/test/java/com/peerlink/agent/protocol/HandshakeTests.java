@@ -17,7 +17,7 @@ class HandshakeTests {
     void helloRoundTrips() throws Exception {
         Handshake.Hello hello = Handshake.parseHello(Handshake.hello(PEER, TICKET));
 
-        assertThat(hello.versions()).containsExactly(1);
+        assertThat(hello.versions()).containsExactly(2);
         assertThat(hello.peerId()).isEqualTo(PEER);
         assertThat(hello.ticket()).isEqualTo(TICKET);
         assertThat(hello.toString()).doesNotContain(TICKET);
@@ -25,8 +25,10 @@ class HandshakeTests {
 
     @Test
     void negotiatesHighestCommonVersionOrNothing() {
-        assertThat(Handshake.negotiate(List.of(1, 2, 3))).hasValue(1);
-        assertThat(Handshake.negotiate(List.of(2, 3))).isEmpty();
+        assertThat(Handshake.negotiate(List.of(1, 2, 3))).hasValue(2);
+        // Version 1 (plaintext) is no longer spoken: there is nothing to downgrade to.
+        assertThat(Handshake.negotiate(List.of(1))).isEmpty();
+        assertThat(Handshake.negotiate(List.of(3, 4))).isEmpty();
     }
 
     @Test
@@ -50,9 +52,9 @@ class HandshakeTests {
 
     @Test
     void helloAckRoundTripsAndHidesProof() throws Exception {
-        Handshake.HelloAck ack = Handshake.parseHelloAck(Handshake.helloAck(1, PEER, PROOF));
+        Handshake.HelloAck ack = Handshake.parseHelloAck(Handshake.helloAck(2, PEER, PROOF));
 
-        assertThat(ack.version()).isEqualTo(1);
+        assertThat(ack.version()).isEqualTo(2);
         assertThat(ack.peerId()).isEqualTo(PEER);
         assertThat(ack.proof()).isEqualTo(PROOF);
         assertThat(ack.toString()).doesNotContain(PROOF);

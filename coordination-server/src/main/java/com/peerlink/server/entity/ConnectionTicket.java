@@ -70,7 +70,24 @@ public class ConnectionTicket extends BaseEntity {
     @Column(name = "outcome_reported_at")
     private Instant outcomeReportedAt;
 
+    /** Fingerprint of the TLS certificate the source agent will present (null for pre-V5 tickets). */
+    @Column(name = "initiator_certificate_sha256", length = 64, updatable = false)
+    private String initiatorCertificateSha256;
+
+    /** The single file transfer this ticket authorizes, or {@code null} for a plain connection test. */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "transfer_id", updatable = false)
+    private FileTransfer transfer;
+
     protected ConnectionTicket() {
+    }
+
+    public ConnectionTicket(Peer sourcePeer, Peer targetPeer, String ticketHash, String responderProof,
+                            Instant issuedAt, Instant expiresAt, String initiatorCertificateSha256,
+                            FileTransfer transfer) {
+        this(sourcePeer, targetPeer, ticketHash, responderProof, issuedAt, expiresAt);
+        this.initiatorCertificateSha256 = initiatorCertificateSha256;
+        this.transfer = transfer;
     }
 
     public ConnectionTicket(Peer sourcePeer, Peer targetPeer, String ticketHash, String responderProof,
@@ -120,6 +137,14 @@ public class ConnectionTicket extends BaseEntity {
         }
         this.outcome = Objects.requireNonNull(outcome);
         this.outcomeReportedAt = now;
+    }
+
+    public String getInitiatorCertificateSha256() {
+        return initiatorCertificateSha256;
+    }
+
+    public FileTransfer getTransfer() {
+        return transfer;
     }
 
     public Peer getSourcePeer() {

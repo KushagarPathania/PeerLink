@@ -7,8 +7,10 @@ import java.util.UUID;
 public interface PresenceClient {
 
     /**
-     * @param listeningPort the port this agent's peer listener is bound to, or {@code null} when it
-     *                      runs no listener (the registered port is then left unchanged)
+     * @param listeningPort        the port this agent's peer listener is bound to, or {@code null}
+     *                             when it runs no listener (the registered port is then left unchanged)
+     * @param tlsCertificateSha256 fingerprint of the certificate the listener presents, or {@code null}
      */
-    HeartbeatResult sendHeartbeat(UUID peerId, AgentCredential credential, Integer listeningPort);
+    HeartbeatResult sendHeartbeat(UUID peerId, AgentCredential credential, Integer listeningPort,
+                                  String tlsCertificateSha256);
 }

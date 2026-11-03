@@ -38,16 +38,22 @@ public class TransferEvent extends BaseEntity {
     @Column(name = "error_code", length = 40, updatable = false)
     private TransferErrorCode errorCode;
 
+    /** The peer whose agent reported this change; {@code null} for changes made by users or the server. */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "reported_by_peer_id", updatable = false)
+    private Peer reportedByPeer;
+
     protected TransferEvent() {
     }
 
     TransferEvent(FileTransfer transfer, int sequenceNumber, TransferStatus fromStatus,
-                  TransferStatus toStatus, TransferErrorCode errorCode) {
+                  TransferStatus toStatus, TransferErrorCode errorCode, Peer reportedByPeer) {
         this.transfer = transfer;
         this.sequenceNumber = sequenceNumber;
         this.fromStatus = fromStatus;
         this.toStatus = toStatus;
         this.errorCode = errorCode;
+        this.reportedByPeer = reportedByPeer;
     }
 
     public FileTransfer getTransfer() {
@@ -68,6 +74,10 @@ public class TransferEvent extends BaseEntity {
 
     public TransferErrorCode getErrorCode() {
         return errorCode;
+    }
+
+    public Peer getReportedByPeer() {
+        return reportedByPeer;
     }
 
     @Override

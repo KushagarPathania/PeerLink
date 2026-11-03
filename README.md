@@ -7,7 +7,7 @@ actual file transfer. File contents never pass through the server.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 
-> **Status: Phase 5 (direct peer connections).** Done so far:
+> **Status: Phase 6 (peer-to-peer file transfer).** Done so far:
 > - Phase 1: project setup, configuration, Flyway, a health endpoint and the agent entry point.
 > - Phase 2: the PostgreSQL schema, JPA entities, repositories and DTOs.
 > - Phase 3: registration, sign-in, sign-out and an account dashboard, in the browser and through
@@ -16,8 +16,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 >   online/offline tracking and discovery of other users' online peers.
 > - Phase 5: direct, server-authorized TCP connections between peer agents, using a small
 >   versioned protocol with handshake, mutual identity check and connection test.
->
-> **No file data is transferred yet.** File sharing and transfers come in Phase 6.
+> - Phase 6: sharing files with specific users and transferring them **directly between devices
+>   over mutually authenticated TLS 1.3**. Files are streamed in chunks and verified with SHA-256
+>   before they are saved. The server records metadata and outcomes but never sees file contents.
 
 ## Project layout
 
@@ -68,6 +69,8 @@ set -a; source .env; set +a
 | `PEER_SWEEP_INTERVAL` | server | `15s` (how often stale peers are marked OFFLINE) |
 | `PEER_SWEEP_ENABLED` | server | `true` |
 | `PEER_CONNECTION_TICKET_TTL` | server | `60s` (lifetime of a direct-connection ticket, 5s–10m) |
+| `PEER_TRANSFER_REQUEST_TTL` | server | `30m` (a request no device picks up fails as `REQUEST_EXPIRED`) |
+| `PEER_TRANSFER_STALL_TIMEOUT` | server | `3m` (a running transfer whose agents stop reporting fails as `TIMEOUT`) |
 | `PEERLINK_SERVER_URL` | agent | `http://localhost:8080` |
 | `PEERLINK_AGENT_PORT` | agent | `9090` |
 | `PEERLINK_DOWNLOAD_DIR` | agent | `~/PeerLink/downloads` |
@@ -79,6 +82,10 @@ set -a; source .env; set +a
 | `PEERLINK_LISTEN_HOST` / `--listen-host` | agent | `127.0.0.1` (this machine only); a LAN IP or `0.0.0.0` for other devices |
 | `PEERLINK_LISTEN_ENABLED` / `--listen` | agent | `true`: accept direct connections when a peer is configured |
 | `PEERLINK_MAX_CONNECTIONS` / `--max-connections` | agent | `8` simultaneous incoming connections (1–64) |
+| `PEERLINK_DATA_DIR` / `--data-dir` | agent | `~/PeerLink/agent`: private list of files shared from this device |
+| `PEERLINK_MAX_FILE_SIZE` / `--max-file-size` | agent | `1GiB`: largest file sent or accepted (bytes, or `500MiB`, `2GiB`, …) |
+| `PEERLINK_MAX_TRANSFERS` / `--max-transfers` | agent | `2` simultaneous uploads, and separately 2 downloads (1–16) |
+| `--share=<file>` | agent | *(command line only)* share that file from this device, then exit |
 
 ## 2. Set up PostgreSQL
 
@@ -114,7 +121,8 @@ database. They move directly between peer agents. No local file paths are stored
 | `shared_files` | Metadata for files a user chose to share from one of their devices |
 | `share_permissions` | Which users may request which file (revocable, optional expiry) |
 | `file_transfers` | Transfer requests, status and progress, checksum verification result |
-| `transfer_events` | Append-only audit trail of every transfer status change |
+| `transfer_events` | Append-only audit trail of every transfer status change, with the reporting device |
+| `connection_tickets` | Single-use direct-connection tickets (hash only), optionally bound to one transfer |
 
 The ER diagram, relationships, constraints and deletion policy are in
 [docs/ARCHITECTURE.md § 6](docs/ARCHITECTURE.md#6-data-model).
@@ -365,16 +373,17 @@ A command-line flag overrides the matching environment variable, which overrides
 
 - **Without a peer id:** the agent validates its configuration, checks that the coordination
   server is healthy, and exits. This is the original behaviour.
-- **With `PEERLINK_PEER_ID` and a credential:** the agent keeps that peer online until stopped,
-  and listens for authorized direct connections from other peers (see
-  [Direct peer connections](#direct-peer-connections)).
+- **With `PEERLINK_PEER_ID` and a credential:** the agent keeps that peer online until stopped.
+  Meanwhile it serves files shared from this device to authorized peers, and fetches files you
+  requested to this device (see [File sharing and transfer](#file-sharing-and-transfer)).
   - Each request has a 5 s connection timeout and a 5 s response timeout.
   - Network failures are retried with exponential backoff (1 s, 2 s, 4 s, …, capped at 60 s), so
     the agent rides out server restarts.
   - If the server rejects the credential (revoked, rotated, or the account disabled), the agent
     stops instead of retrying forever.
-  - Ctrl+C or SIGTERM stops the heartbeat thread and the listener cleanly, releasing the port.
-  - A failed peer connection never stops heartbeats.
+  - Ctrl+C or SIGTERM stops the heartbeat thread, the listener and running transfers cleanly. The
+    port is released, and partial downloads are deleted.
+  - A failed peer connection or transfer never stops heartbeats.
   - The agent logs the address the server sees it at, and warns if that is a loopback address.
   - The credential is never logged.
 
@@ -386,13 +395,18 @@ A command-line flag overrides the matching environment variable, which overrides
 | `3` | The server rejected the agent credential |
 | `4` | `--connect-to`: the connection test failed |
 | `5` | The peer listener could not start (for example, the port is in use) |
+| `6` | `--share`: the file could not be shared |
 | `143` | Stopped by SIGTERM (standard for signal termination) |
 
 ## Direct peer connections
 
-Phase 5 lets two peer agents open a **direct TCP connection** and verify each other. **It does not
-transfer files yet**; that is Phase 6. The coordination server authorizes each connection but
-never carries any of its traffic.
+Two peer agents can open a **direct TCP connection protected by mutually authenticated TLS 1.3**
+and verify each other. File transfers (next section) use exactly these connections. The
+coordination server authorizes each connection but never carries any of its traffic.
+
+> **Upgrade all agents together.** Phase 6 agents speak only protocol v2 (TLS 1.3, ALPN
+> `peerlink/2`); Phase 5 agents speak only v1 (plaintext). The two cannot connect in either
+> direction, and Phase 6 agents also need a Phase 6 coordination server.
 
 **How a connection is authorized:**
 
@@ -406,6 +420,16 @@ never carries any of its traffic.
    really is. Then B returns a proof that only the genuine B could have obtained, so A knows it
    reached the right peer.
 5. A and B exchange a `PING`/`PONG` connection test and close the connection.
+
+**TLS identity:**
+- Every agent process generates its own key pair and self-signed certificate at start-up. Nothing
+  is written to disk.
+- The server, which already authenticates every agent, hands out the SHA-256 fingerprints:
+  - the listener reports its own with each heartbeat
+  - the connecting agent sends its own with the ticket request
+- A pins B's certificate during the TLS handshake. B checks that A's certificate is the one bound
+  to the ticket before it answers.
+- There is no plaintext mode and no fallback.
 
 Agent credentials never leave their own agent. Tickets and proofs are never logged.
 
@@ -434,8 +458,7 @@ attempt (no retries), prints the result, reports the outcome to the server, and 
 - `3`: this device's credential was rejected
 
 **More detail:**
-- [docs/TCP_PROTOCOL.md](docs/TCP_PROTOCOL.md): protocol and security limitations, notably that
-  there is **no TLS yet**
+- [docs/TCP_PROTOCOL.md](docs/TCP_PROTOCOL.md): protocol, TLS design and security limitations
 - [docs/MANUAL_TEST_PEER_CONNECTIONS.md](docs/MANUAL_TEST_PEER_CONNECTIONS.md): a step-by-step
   test with two agents, on one machine and across a LAN
 
@@ -443,9 +466,126 @@ Agent-only endpoints (Bearer agent credential, each only for the agent's own pee
 
 | Method and path | Result |
 |---|---|
-| `POST /api/peers/{peerId}/connections` `{targetPeerId}` | 201 ticket, target host and port, responder proof, expiry; 404 if the target is not available |
-| `POST /api/peers/{peerId}/connections/redeem` `{ticket}` | 200 source peer id, device and owner, plus the proof; 403 `CONNECTION_TICKET_INVALID` for unknown, expired, used, revoked or misdirected tickets |
+| `POST /api/peers/{peerId}/connections` `{targetPeerId, transferId?, initiatorCertificateSha256}` | 201 ticket, target host and port, target certificate fingerprint, responder proof, expiry; 404 if the target or transfer is not available |
+| `POST /api/peers/{peerId}/connections/redeem` `{ticket, presentedCertificateSha256}` | 200 source peer id, device and owner, its certificate fingerprint, the proof and (for transfer tickets) the authorized transfer; 403 `CONNECTION_TICKET_INVALID` for unknown, expired, used, revoked or misdirected tickets, and for a ticket presented over a different TLS certificate (that ticket stays usable by its real owner) |
 | `POST /api/peers/{peerId}/connections/{ticketId}/outcome` `{outcome}` | 204; reported once, by the source only |
+
+## File sharing and transfer
+
+You share a file **from the device that holds it**; the file never leaves that device until an
+authorized peer fetches it directly. The server only knows its name, size and SHA-256.
+
+### How it works
+
+1. **Share.** On the device holding the file, run the agent once with `--share`:
+
+   ```bash
+   export PEERLINK_PEER_ID=<this device's peer id>
+   export PEERLINK_AGENT_CREDENTIAL='<this device's credential>'
+   java -jar peer-agent.jar --server-url=http://<server>:8080 --share=/path/to/report.pdf
+   ```
+
+   The agent hashes the file locally (streaming), registers the name, size and SHA-256, and
+   remembers the local path in its private list (`--data-dir`). No path is sent to the server.
+2. **Grant access.** In the dashboard, under **Files you share**, choose **Manage access** and enter
+   a username. Access can be revoked at any time, and **Stop sharing** withdraws the file.
+3. **Request.** The other user sees the file under **Shared with you**, chooses one of their own
+   devices, and clicks **Send to device**.
+4. **Transfer.** That device's agent (it must be running) notices the request within about 5 s.
+   1. It gets a ticket **bound to this one transfer** and connects over TLS to the sharing device.
+   2. The sharing device's agent redeems the ticket. The server re-checks the permission, and the
+      transfer becomes AUTHORIZED ("accepted"). The sharing device then offers exactly the file the
+      server authorized.
+   3. The receiver checks the offer against the server's metadata, receives the file in 64 KiB
+      chunks, and writes it to a private temporary file.
+   4. The receiver verifies the byte count and SHA-256, and only then saves the file under its real
+      name in its download directory, as `name (2).ext` if the name is taken. Existing files are
+      never overwritten.
+5. **Watch.** The **Transfers** table shows status, progress and any failure reason. Running
+   transfers can be cancelled; the agents notice within a few seconds.
+
+The receiving device must be running its agent (in normal heartbeat mode) to pick up requests.
+The sharing device must be running its agent with the listener enabled.
+
+### What is checked
+
+- **Default deny.** A transfer needs the owner's grant, or the requester is the owner. Knowing a
+  file id or holding a connection ticket is never enough.
+- **Re-checked throughout.** Authorization is checked again when the transfer is requested, when
+  its ticket is issued and redeemed, on every progress report, **every 5 s by the sender while
+  streaming**, right before the received file is saved, and at completion. Revoking access or
+  cancelling therefore stops a running transfer, even one whose receiver stopped reading. If
+  authorization cannot be confirmed (server unreachable), the sender stops sending and the
+  receiver does not save the file.
+- **No stuck transfers.** Every read and write has a deadline, so a peer that stops responding
+  cannot hold a transfer slot.
+- **Safe file names.** The remote file name is only a display name. Paths, `..`, separators and
+  control characters are refused, and files are written only inside the download directory.
+  Symbolic links are never followed when writing.
+- **Integrity.** Chunks must arrive strictly in order with exact sizes. Extra, missing or
+  out-of-order data, a wrong total size or a SHA-256 mismatch fails the transfer and deletes the
+  partial file.
+- **Source changes.** The sender detects a file that changed since it was shared or while it was
+  being sent, by size, modification time and SHA-256.
+- **Integrity is not authentication.** The SHA-256 checksum detects corruption; the authenticity
+  of the sender comes from TLS and the ticket.
+- **Never resumed.** Interrupted transfers are not resumed: they end as FAILED, and the partial
+  file is deleted. Request the file again.
+- **A saved file stays saved.** Once a verified file is saved, losing the connection or the server
+  cannot undo it or mark it failed. The device keeps reporting the completion (also after a
+  restart) until the server confirms it; if the server was unreachable for longer than 3 minutes,
+  it may have recorded the transfer as timed out, and the agent logs that.
+- **Chunk size.** Files are registered with 64 KiB chunks; the server accepts 4 KiB to 64 KiB only.
+- **Limits.** By default the largest file is 1 GiB (`--max-file-size`), with 2 simultaneous uploads
+  and 2 downloads per agent (`--max-transfers`).
+
+### Verifying a received file yourself
+
+The dashboard shows "SHA-256 verified" for completed transfers. To check by hand, compare the
+SHA-256 on both devices with the one the sender printed when sharing:
+
+```bash
+shasum -a 256 ~/PeerLink/downloads/report.pdf        # macOS / Linux
+certutil -hashfile report.pdf SHA256                 # Windows
+```
+
+### Transfer API
+
+| Method and path | Who | Result |
+|---|---|---|
+| `GET /api/files/mine` | signed-in user | your shared files (paged) |
+| `GET /api/files/shared-with-me` | signed-in user | files others shared with you (paged) |
+| `GET /api/files/{id}/permissions` | owner | who may fetch it |
+| `POST /api/files/{id}/permissions` `{username, expiresAt?}` | owner | 201 grant |
+| `DELETE /api/files/{id}/permissions/{permissionId}` | owner | 204 revoke |
+| `DELETE /api/files/{id}` | owner | 204 stop sharing |
+| `POST /api/transfers` `{sharedFileId, receiverPeerId}` | permitted user, to their own device | 201 REQUESTED; 404 if not permitted, 409 if the sender is offline or a duplicate is running |
+| `GET /api/transfers` / `GET /api/transfers/{id}` | requester or file owner | history / one transfer |
+| `POST /api/transfers/{id}/cancel` | requester or file owner | CANCELLED; 409 if already finished |
+| `POST /api/peers/{peerId}/files` | agent | register a shared file (metadata only; `chunkSizeBytes` 4096–65536) |
+| `GET /api/peers/{peerId}/transfers/next` | agent (receiver) | next transfer to fetch, or 204 |
+| `GET /api/peers/{peerId}/transfers/{id}` | agent (sender or receiver) | status and whether still authorized |
+| `POST /api/peers/{peerId}/transfers/{id}/progress` | agent (receiver) | throttled progress; answers whether to continue |
+| `POST /api/peers/{peerId}/transfers/{id}/complete` | agent (receiver) | size + SHA-256 must match the registered file and access must still be granted; repeating an accepted report returns 200 again (idempotent), any other finished state is 409 |
+| `POST /api/peers/{peerId}/transfers/{id}/fail` / `/reject` | agent (either side) | failure or decline with a reason code |
+
+Every change is recorded in `transfer_events` together with the device that reported it.
+
+A step-by-step test with two agents is in
+[docs/MANUAL_TEST_FILE_TRANSFER.md](docs/MANUAL_TEST_FILE_TRANSFER.md).
+
+### Security status and limits
+
+- **Encrypted and authenticated.** Peer traffic, both control messages and file data, is
+  encrypted and mutually authenticated with TLS 1.3. This holds only as far as the fingerprints
+  the server distributes can be trusted, so **run the coordination server over HTTPS** whenever the
+  network between agents and server is not trusted. The agent warns when the server URL is plain
+  HTTP and not on loopback.
+- **No end-to-end encryption against the server.** The coordination server could, in principle,
+  hand out a fingerprint of its choosing. A malicious or compromised server is outside this design.
+- **No resume and no NAT traversal.** Peers must be able to reach each other directly (same LAN,
+  or port forwarding).
+- **Received files are not scanned.** Treat downloads like any other file from another person.
 
 ## Networking scope
 
@@ -462,9 +602,9 @@ does not trust `X-Forwarded-For` unless you explicitly configure
 - A device with several network interfaces is recorded at the address it used to reach the
   server.
 
-PeerLink currently targets peers on the **same LAN**. Each device's agent must listen on a LAN
-address (`--listen-host`, see above), and its firewall must allow inbound TCP on the agent port
-(default 9090). A connection test between two agents on one machine succeeds over loopback, but
+PeerLink currently targets peers on the **same LAN**. The sharing device's agent must listen on a
+LAN address (`--listen-host`, see above), and its firewall must allow inbound TCP on the agent
+port (default 9090). The receiving device only makes outgoing connections. A connection test between two agents on one machine succeeds over loopback, but
 that does not show the devices can reach each other on the LAN. Peers on different networks need NAT traversal, a relay,
 port forwarding or a VPN, which are out of scope for now. See the architecture document.
 

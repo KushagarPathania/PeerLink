@@ -11,8 +11,8 @@ class TransferStatusTests {
 
     @ParameterizedTest
     @CsvSource({
-            "REQUESTED, AUTHORIZED", "REQUESTED, FAILED", "REQUESTED, CANCELLED",
-            "AUTHORIZED, IN_PROGRESS", "AUTHORIZED, FAILED", "AUTHORIZED, CANCELLED",
+            "REQUESTED, AUTHORIZED", "REQUESTED, REJECTED", "REQUESTED, FAILED", "REQUESTED, CANCELLED",
+            "AUTHORIZED, IN_PROGRESS", "AUTHORIZED, REJECTED", "AUTHORIZED, FAILED", "AUTHORIZED, CANCELLED",
             "IN_PROGRESS, COMPLETED", "IN_PROGRESS, FAILED", "IN_PROGRESS, CANCELLED"})
     void allowsLegalTransitions(TransferStatus from, TransferStatus to) {
         assertThat(from.canTransitionTo(to)).isTrue();
@@ -21,13 +21,14 @@ class TransferStatusTests {
     @ParameterizedTest
     @CsvSource({
             "REQUESTED, IN_PROGRESS", "REQUESTED, COMPLETED", "AUTHORIZED, COMPLETED",
-            "AUTHORIZED, REQUESTED", "IN_PROGRESS, AUTHORIZED", "IN_PROGRESS, IN_PROGRESS"})
+            "AUTHORIZED, REQUESTED", "IN_PROGRESS, AUTHORIZED", "IN_PROGRESS, IN_PROGRESS", "IN_PROGRESS, REJECTED",
+            "REJECTED, AUTHORIZED", "FAILED, IN_PROGRESS"})
     void rejectsIllegalTransitions(TransferStatus from, TransferStatus to) {
         assertThat(from.canTransitionTo(to)).isFalse();
     }
 
     @ParameterizedTest
-    @EnumSource(value = TransferStatus.class, names = {"COMPLETED", "FAILED", "CANCELLED"})
+    @EnumSource(value = TransferStatus.class, names = {"COMPLETED", "REJECTED", "FAILED", "CANCELLED"})
     void terminalStatusesAllowNoFurtherTransitions(TransferStatus status) {
         assertThat(status.isTerminal()).isTrue();
         assertThat(status.allowedNextStatuses()).isEmpty();

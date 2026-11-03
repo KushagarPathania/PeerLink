@@ -16,6 +16,8 @@ public interface SharePermissionRepository extends JpaRepository<SharePermission
 
     Optional<SharePermission> findBySharedFileAndPermittedUser(SharedFile sharedFile, User permittedUser);
 
+    Optional<SharePermission> findByIdAndSharedFileId(UUID id, UUID sharedFileId);
+
     @EntityGraph(attributePaths = {"permittedUser", "grantedBy"})
     List<SharePermission> findBySharedFileOrderByCreatedAtAsc(SharedFile sharedFile);
 

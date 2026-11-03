@@ -57,3 +57,9 @@ peerlink:
   connections:
     # How long a direct-connection ticket can be redeemed after it is issued (5s..10m).
     ticket-ttl: ${PEER_CONNECTION_TICKET_TTL:60s}
+  transfers:
+    # A requested transfer nobody picks up fails after request-ttl; an accepted or running one
+    # fails when its agents stop reporting for stall-timeout.
+    request-ttl: ${PEER_TRANSFER_REQUEST_TTL:30m}
+    stall-timeout: ${PEER_TRANSFER_STALL_TIMEOUT:3m}
+    sweep-enabled: ${PEER_TRANSFER_SWEEP_ENABLED:true}

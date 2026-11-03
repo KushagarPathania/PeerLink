@@ -118,10 +118,67 @@
                     <p class="small text-body-secondary">
                         Devices of other users that sent a heartbeat recently. Online does not guarantee that a
                         direct connection will succeed (firewalls and different networks can block it).
-                        Sending files to a peer will be added in an upcoming release.
                     </p>
                     <div id="onlineStatus" class="text-body-secondary small" role="status">Loading online peers…</div>
                     <ul class="list-group list-group-flush d-none" id="onlineList"></ul>
+                </div>
+            </section>
+        </div>
+
+        <div class="col-lg-6">
+            <section class="card shadow-sm h-100" aria-labelledby="mySharesHeading">
+                <div class="card-body">
+                    <h2 id="mySharesHeading" class="h5 mb-2">Files you share</h2>
+                    <p class="small text-body-secondary mb-2">
+                        Files are shared from a device, never uploaded here. On that device run
+                        <code>java -jar peer-agent.jar --share=&lt;file&gt;</code> (with its peer id and credential),
+                        then choose who may fetch it.
+                    </p>
+                    <div id="mySharesStatus" class="text-body-secondary small" role="status">Loading your files…</div>
+                    <ul class="list-group list-group-flush d-none" id="mySharesList"></ul>
+                </div>
+            </section>
+        </div>
+
+        <div class="col-lg-6">
+            <section class="card shadow-sm h-100" aria-labelledby="sharedWithMeHeading">
+                <div class="card-body">
+                    <h2 id="sharedWithMeHeading" class="h5 mb-2">Shared with you</h2>
+                    <p class="small text-body-secondary mb-2">
+                        Choose one of your devices: its agent fetches the file directly from the owner's device.
+                    </p>
+                    <div id="sharedWithMeStatus" class="text-body-secondary small" role="status">Loading…</div>
+                    <ul class="list-group list-group-flush d-none" id="sharedWithMeList"></ul>
+                </div>
+            </section>
+        </div>
+
+        <div class="col-12">
+            <section class="card shadow-sm" aria-labelledby="transfersHeading">
+                <div class="card-body">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                        <h2 id="transfersHeading" class="h5 mb-0">Transfers</h2>
+                        <button class="btn btn-outline-secondary btn-sm" type="button" id="refreshTransfers">Refresh</button>
+                    </div>
+                    <p class="small text-body-secondary">
+                        File contents travel directly between the two devices over an encrypted, mutually
+                        authenticated connection; this server only coordinates and records the outcome.
+                    </p>
+                    <div id="transfersStatus" class="text-body-secondary small" role="status">Loading transfers…</div>
+                    <div class="table-responsive">
+                        <table class="table align-middle mb-0 d-none" id="transfersTable">
+                            <thead>
+                            <tr>
+                                <th scope="col">File</th>
+                                <th scope="col">From → to</th>
+                                <th scope="col">Status</th>
+                                <th scope="col" class="transfer-progress-column">Progress</th>
+                                <th scope="col"><span class="visually-hidden">Actions</span></th>
+                            </tr>
+                            </thead>
+                            <tbody id="transfersBody"></tbody>
+                        </table>
+                    </div>
                 </div>
             </section>
         </div>

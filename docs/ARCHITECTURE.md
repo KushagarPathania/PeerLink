@@ -70,28 +70,35 @@ There are two separate channels.
 | Channel | Between | Protocol | Carries |
 |---|---|---|---|
 | **Control plane** | Browser ↔ server, agent ↔ server | HTTP + JSON (REST) | login, peer registration, heartbeats, discovery, file metadata, transfer requests, status reports |
-| **Data plane** | Agent ↔ agent | TCP (`Socket` / `ServerSocket`), [PeerLink protocol v1](TCP_PROTOCOL.md) | handshake and connection test (Phase 5); file chunks (Phase 6) |
+| **Data plane** | Agent ↔ agent | TCP (`Socket` / `ServerSocket`) with mutually authenticated TLS 1.3, [PeerLink protocol v2](TCP_PROTOCOL.md) | handshake and connection test (Phase 5); file chunks (Phase 6) |
 
-### 2.1 Planned transfer flow
+> **Protocol compatibility:** Phase 5 agents speak protocol v1 over plaintext TCP; Phase 6 agents
+> speak only v2 over TLS 1.3 (ALPN `peerlink/2`) and refuse anything else. A v1 agent and a v2
+> agent cannot connect to each other in either direction, so upgrade all agents together.
 
-1. **Registration.** When an agent starts, it authenticates with the server and registers its
-   LAN address and listen port. It then sends periodic heartbeats. A scheduler marks a peer
-   offline when its heartbeats stop.
-2. **Discovery.** A user sees online peers in the dashboard.
-3. **Request.** The sender chooses a file it has explicitly shared and a recipient. The server
-   checks permissions, creates a `TransferRequest`, and issues a **short-lived, single-use
-   transfer token** bound to that transfer, both peers and the file checksum.
-4. **Connect.** The sending agent connects to the receiver's `ServerSocket` and presents the
-   token. The receiver validates the token with the server before it accepts any data. This step
-   is implemented in Phase 5 as connection tickets; see [section 9](#9-direct-peer-connections).
-5. **Transfer.** The file is streamed in fixed-size chunks. The receiver writes them to a
-   temporary file in its download directory. Transfers run on an `ExecutorService` so several
-   can run at once.
-6. **Verify.** The receiver computes SHA-256 and compares it with the checksum in the server's
-   metadata. On a match, it moves the temporary file to its final name. On a mismatch, it
-   discards the file.
-7. **Report.** Both agents report progress and the final status. The server records them in
-   the transfer history.
+### 2.1 Transfer flow (implemented in Phase 6)
+
+1. **Presence.** Each agent heartbeats with its listening port and TLS certificate fingerprint.
+   The server records the address it observes.
+2. **Share.** The device holding a file registers its name, size and SHA-256 (`--share`). The local
+   path stays on the device.
+3. **Grant.** The owner grants specific users access in the dashboard.
+4. **Request.** A permitted user requests the file to one of their own devices. The server checks
+   the permission and creates a `FileTransfer` in the REQUESTED state.
+5. **Connect.** The receiving agent picks the request up, obtains a single-use ticket bound to
+   that transfer, and connects over mutually authenticated TLS 1.3 to the sending agent. The
+   sending agent redeems the ticket; the server re-checks authorization and marks the transfer
+   AUTHORIZED ("accepted").
+6. **Transfer.** The sender offers exactly the authorized file and streams it in 64 KiB chunks,
+   re-checking authorization every 5 s. The receiver writes to a private temporary file and
+   reports progress.
+7. **Verify.** The receiver checks the byte count and SHA-256 against the server's metadata, then
+   atomically publishes the file under a name that is never an existing file's.
+8. **Report.** The receiver reports completion, which the server checks against the registered
+   size and SHA-256. Either side reports failures. Every change is recorded with the reporting
+   device in `transfer_events`.
+
+See [section 10](#10-file-transfer) and [TCP_PROTOCOL.md](TCP_PROTOCOL.md).
 
 ## 3. Security model
 
@@ -100,11 +107,16 @@ There are two separate channels.
   variables. They are never committed.
 - Users authenticate with Spring Security sessions (see [section 7](#7-authentication-and-authorization)).
   Every route is protected unless it is explicitly listed as public.
-- An agent accepts a connection only if it presents a valid, unexpired token issued for that
-  exact transfer.
-- An agent reads only files the user explicitly selected and writes only inside its download
-  directory. Incoming file names are sanitized to prevent path traversal (`../`). There is no
-  remote browsing or arbitrary file access.
+- **Peer traffic** is mutually authenticated TLS 1.3. Certificate fingerprints are distributed by
+  the server.
+- **Connections need a ticket.** An agent accepts a connection only with a valid, unexpired,
+  single-use ticket issued for that exact pair of peers (and transfer), presented over TLS by the
+  certificate the ticket names.
+- **File access is limited to explicit shares.** An agent serves only files its user explicitly
+  shared, identified by server-authorized id, never by path.
+- **Downloads stay in the download directory.** An agent writes only there, never through a
+  symbolic link, and never over an existing file.
+- **No remote browsing.** There is no remote browsing or arbitrary file access.
 
 ## 4. Network scope and limitations
 
@@ -273,16 +285,20 @@ Day-to-day "deletes" are soft:
 
 `TransferStatus` defines the legal transitions:
 
-- REQUESTED → AUTHORIZED → IN_PROGRESS → COMPLETED
+- REQUESTED → AUTHORIZED ("accepted" by the sending agent) → IN_PROGRESS → COMPLETED
+- REQUESTED or AUTHORIZED → REJECTED, when a peer declines before any data (for example, too
+  large, no space, file gone or busy)
 - Any non-terminal status → FAILED or CANCELLED
+- COMPLETED, REJECTED, FAILED and CANCELLED are terminal
 
 `FileTransfer` exposes only methods that follow these rules: `authorize`, `start`,
-`recordProgress`, `completeWithVerifiedChecksum`, `failChecksumVerification`, `fail` and
-`cancel`. Each method appends a `TransferEvent`. Progress must stay within bounds and can never
+`recordProgress`, `completeWithVerifiedChecksum`, `failChecksumVerification`, `fail`, `reject`
+and `cancel`. Each method appends a `TransferEvent`, including the peer whose agent reported the
+change (V5). Progress must stay within bounds and can never
 go backwards. A transfer can only complete once all bytes and chunks are recorded, and the
 caller must invoke the completion method only after the receiver has verified the SHA-256
-checksum. The transfer services added in a later phase will call these methods inside
-`@Transactional` boundaries.
+checksum. `TransferService` (users) and `TransferAgentService` (agents) call these methods
+inside `@Transactional` boundaries (section 10).
 
 ### 6.7 Migrations
 
@@ -294,6 +310,9 @@ checksum. The transfer services added in a later phase will call these methods i
     constraints to `peers`.
   - `V4__connection_tickets.sql` adds `connection_tickets` for direct peer connections
     (section 9).
+  - `V5__file_transfer_and_peer_tls.sql` adds TLS fingerprints, binds tickets to transfers, adds
+    the REJECTED status and new error codes, and records the reporting peer on transfer events
+    (section 10).
 - **Never edit a migration once it has been applied** to a database that is kept. Flyway
   checksums each script and refuses to start if one has changed. Make every change in a new
   `V<n>__description.sql`.
@@ -551,7 +570,8 @@ the server brokers each connection with a **single-use connection ticket**:
 
 | Package / class | Role |
 |---|---|
-| `protocol/` (`FrameIO`, `MessageCodec`, `Message`, `MessageType`, `Handshake`, `ProtocolChannel`, `RejectReason`) | Wire format only: length-prefixed frames with the length checked before allocation, and strict UTF-8 `key=value` messages. No sockets, no Java serialization. |
+| `protocol/` (`FrameIO`, `MessageCodec`, `Message`, `MessageType`, `Handshake`, `TransferMessages`, `ProtocolChannel`, `RejectReason`, `TransferError`) | Wire format only: control (`C`) and data (`D`) frames with the kind and length checked before allocation, and strict UTF-8 `key=value` messages. No sockets, no Java serialization. |
+| `security/` (`TlsIdentity`, `SelfSignedCertificate`, `PeerTls`, `PinnedServerTrustManager`, `DeferredClientTrustManager`, `CertificateFingerprints`) | Per-process TLS identity and mutually authenticated TLS 1.3 with pinned fingerprints (Phase 6). |
 | `security/` (`TicketIssuer`, `TicketVerifier`, `IssuedTicket`, `VerifiedTicket`) | Interfaces for obtaining and verifying tickets. Ticket and proof are masked in `toString()`. |
 | `networking/CoordinationTicketAuthority` | Implements both interfaces through the coordination server. The agent credential stays here. |
 | `networking/PeerListener` | `ServerSocket` bound to `--listen-host:--port` (loopback by default), with a semaphore-limited fixed worker pool. Over-limit connections get `REJECT BUSY` on a separate small thread, so the accept loop never blocks. `close()` closes the port and all connections and stops the workers. |
@@ -569,5 +589,110 @@ the server brokers each connection with a **single-use connection ticket**:
   exits, so it never runs inside, or blocks, the heartbeat agent.
 - **Phase 1–4 behaviour is unchanged:**
   - Without a peer configured, the agent checks the server's health and exits.
-  - `--listen=false` gives exactly the Phase 4 heartbeat-only agent.
-  - Exit codes 0–3 keep their meanings; codes 4 and 5 are new.
+  - `--listen=false` gives an agent that heartbeats and fetches requested files but serves none.
+  - Exit codes 0–3 keep their meanings; codes 4 and 5 were added in Phase 5, and 6 (`--share`
+    failed) in Phase 6.
+- **Phase 6 change:** peer connections are TLS-only (protocol v2). Phase 5 (v1, plaintext) agents
+  and Phase 6 (v2) agents cannot connect to each other in either direction; there is no fallback.
+  Ticket redemption also changed: the listener now sends the presented TLS certificate's
+  fingerprint (`presentedCertificateSha256`, required), so Phase 6 agents need a Phase 6 server.
+
+## 10. File transfer
+
+### 10.1 Design decisions
+
+- **Pull model.** A user requests a file *to one of their own devices*. The database enforces that
+  the receiving peer belongs to the requester (composite FK, V2). The receiver's agent initiates
+  the connection, so only the sending device needs to accept inbound connections.
+- **Agent-side sharing.** The browser cannot read local files, and the server must not hold them.
+  `--share` therefore hashes the file on the device and registers only metadata. The device keeps
+  its own id → path list (`ShareIndex`, in `--data-dir`, owner-only permissions).
+- **One authorization decision, evaluated everywhere.** `TransferAuthorizationPolicy` decides
+  whether a user may receive a file: owner, or active permission, file still shared, both accounts
+  enabled. It runs at request, ticket issue, ticket redemption, every progress report and every
+  sender check.
+- **Ticket binding.** A connection ticket may carry one `transfer_id`. When the sender redeems it,
+  the server returns the exact transfer (file id, name, size, SHA-256) that the sender may serve.
+- **TLS without a CA.** Each agent process has an ephemeral key pair, and fingerprints are
+  distributed by the already-authenticated server and pinned on both sides. No private key is
+  stored, no certificate authority is needed, and nothing trusts arbitrary certificates
+  (section 10.4).
+- **No resume.** An interrupted transfer fails (with a reason) and its partial file is deleted.
+  Requesting again starts a fresh transfer.
+- **Chunk-size policy: 4 KiB to 64 KiB.** The upper bound is the protocol's data frame limit; the
+  lower bound keeps per-frame overhead sensible. The registration API refuses anything else (400),
+  and both agents check again before connecting or serving. The entity and the V2 database check
+  still allow the wider 1 B–16 MiB range they were created with; no migration was needed because
+  the API is the only way files get registered. Flow control counts bytes on both sides (an
+  acknowledgement every 1 MiB, an 8 MiB window), so the number of unread acknowledgements is
+  bounded whatever the chunk size.
+- **No unbounded blocking.** Reads have deadlines (`DeadlineInputStream`), and so do writes:
+  `ConnectionWatchdog` closes the plain TCP socket of a connection whose write has blocked longer
+  than its deadline (sockets have no write timeout; `SO_TIMEOUT` covers reads only). Other threads
+  stop a connection the same way: cancellation, revocation, an expired authorization lease, and
+  shutdown all unblock a sender stuck in a write or read, and its upload slot is released.
+- **Publication is the point of no return.** Before it, any failure discards the partial file and
+  the transfer is reported failed. After it, the file is never deleted and the transfer is never
+  reported failed: the receiver reports completion until the server answers definitively (see
+  TCP_PROTOCOL.md, "After publication"), and a sender that loses the connection after
+  `TRANSFER_END` leaves the outcome to the receiver.
+
+### 10.2 Server components
+
+| Component | Responsibility |
+|---|---|
+| `V5__file_transfer_and_peer_tls.sql` | `peers.tls_certificate_sha256`; `connection_tickets.initiator_certificate_sha256` and `transfer_id`; `REJECTED` and nine new error codes; failed or rejected transfers require a code; `transfer_events.reported_by_peer_id`; an index for "next transfer for this receiver" |
+| `SharedFileService` / `SharedFileApiController` (`/api/files`) | Agent registration (idempotent); owners list files, grant, list and revoke permissions, stop sharing |
+| `TransferService` / `TransferApiController` (`/api/transfers`) | Users request, list, view and cancel. Visible only to the requester and the file owner. |
+| `TransferAgentService` / `PeerTransferApiController` (`/api/peers/{peerId}/…`) | Agents: next pending transfer, status, progress (receiver only), complete (receiver only; checked against size and SHA-256 and re-authorized; idempotent for an identical repeat), fail, reject |
+| `TransferAuthorizationPolicy` | The single authorization rule above |
+| `ConnectionTicketService` | Issues transfer-bound tickets (receiver → sender, REQUESTED only, one outstanding ticket per transfer); at redemption checks the presented TLS certificate before consuming the ticket, re-checks authorization and moves the transfer to AUTHORIZED |
+| `TransferSweeper` | Fails unclaimed requests (`REQUEST_EXPIRED`, 30 min) and stalled transfers (`TIMEOUT`, 3 min) |
+
+**Hardening worth knowing:**
+- A completion report whose size or checksum differs from the registered file fails the
+  transfer. That failure is committed even though the request is answered with 400.
+- A concurrent update (optimistic lock) is answered with 409 `CONCURRENT_MODIFICATION`; agents
+  retry it.
+- Completion is idempotent: the same report for an already COMPLETED transfer returns 200 and
+  records nothing; a report for a transfer that ended otherwise is 409 `TRANSFER_STATE_CONFLICT`.
+  A completion that arrives after access was revoked fails the transfer (`PERMISSION_DENIED`),
+  committed despite the 409.
+- Chunk sizes outside 4 KiB–64 KiB cannot be registered.
+
+### 10.3 Agent components
+
+| Class (`transfer/`) | Responsibility |
+|---|---|
+| `FileSharer` | `--share`: rejects symlinks, directories and over-size files; streaming SHA-256; registers metadata; records the real path in `ShareIndex` |
+| `UploadSession` | Sender (`IncomingTransferHandler`): grant check, upload slots, offer from server metadata, windowed streaming, authorization lease renewed every 5 s on a checker thread (fail closed), aborting a blocked connection when stopped, source-change detection, END/COMPLETE |
+| `SourceFile` | Opens the shared file (no symlinks), checks size, reads bounded chunks, detects changes (size, mtime, extra bytes) |
+| `DownloadManager` | Polls for requests every 5 s (first retrying undelivered completion reports) and runs at most `--max-transfers` downloads on its own threads; on shutdown aborts their connections |
+| `DownloadSession` | Receiver: pre-checks (size limit, name, chunk size, free space), ticket, connect, offer check, strict chunk checks, ACKs per MiB, progress reports, verification, final authorization check (fails closed), publish, then TRANSFER_COMPLETE and the completion report, neither of which can undo the publication |
+| `CompletionReports` | Delivers completion reports: backoff retries for 60 s, a journal in the data directory, retried on every poll and after restart until the server accepts or refuses |
+| `DownloadTarget` | Private temp file (`.peerlink-*.part`, exclusive create), bounded writes, fsync, size + SHA-256 check, publish by reserving the name with exclusive creation then atomic rename, delete on failure |
+| `FileNames` | Validates untrusted names: a single path element, no separators, `..` or control characters, at most 255 bytes, no trailing dot or space |
+| `CoordinationTransferCoordinator` | The server calls above (via `CoordinationServerClient.postJson/getJson`) |
+
+### 10.4 TLS design
+
+The **coordination server is the trust anchor**, just as it already is for agent credentials and
+tickets:
+
+| Who | Learns | From |
+|---|---|---|
+| Server | each listener's certificate fingerprint | the agent's authenticated heartbeat |
+| Server | the initiator's certificate fingerprint | the authenticated ticket request (stored on the ticket) |
+| Initiator | the target's fingerprint | the ticket response; pinned during the TLS handshake |
+| Listener | the initiator's fingerprint | the ticket redemption, which the server performs only for the presented certificate's fingerprint; compared again before `HELLO_ACK` |
+
+- **Algorithms:** TLS 1.3 only, ALPN `peerlink/2` required during the handshake (both trust
+  managers refuse otherwise), EC P-256 keys.
+- **Certificates:** self-signed X.509 v3, encoded by `SelfSignedCertificate` (the JDK has no
+  public certificate-builder API) and signed with `java.security.Signature`. They are parsed back
+  by `CertificateFactory`, which rejects anything malformed.
+- **Mutual authentication is a combination of both checks.** The initiator rejects any server
+  certificate other than the pinned one. The listener requires a client certificate during the
+  handshake, then refuses the connection unless it is the one bound to the ticket.
+- **Remaining trust assumption:** the agent↔server channel must be authentic. Use HTTPS in
+  production; the agent warns about plain HTTP to a non-loopback server.

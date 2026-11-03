@@ -22,8 +22,8 @@ import org.springframework.test.web.servlet.MockMvc;
  * Full application (real security filter chains, services and PostgreSQL) driven through
  * MockMvc. Data is committed, so every test uses unique usernames.
  */
-// The background sweep is off so it cannot race tests that set up stale peers deliberately.
-@SpringBootTest(properties = "peerlink.peers.sweep-enabled=false")
+// Background sweeps are off so they cannot race tests that set up stale peers or transfers deliberately.
+@SpringBootTest(properties = {"peerlink.peers.sweep-enabled=false", "peerlink.transfers.sweep-enabled=false"})
 @AutoConfigureMockMvc
 public abstract class WebIntegrationTestSupport extends PostgresContainerSupport {
 

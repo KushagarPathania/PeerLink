@@ -106,4 +106,54 @@ class PeerAgentApplicationTests {
             assertThat(exitCode).isEqualTo(PeerAgentApplication.EXIT_LISTENER_FAILED);
         }
     }
+
+    @Test
+    void shareModeRegistersTheFileAndExits(@TempDir Path dir) throws IOException {
+        java.util.concurrent.atomic.AtomicReference<String> registration = new java.util.concurrent.atomic.AtomicReference<>();
+        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        server.createContext("/api/health", exchange -> {
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        server.createContext("/api/peers/" + PEER_ID + "/files", exchange -> {
+            registration.set(new String(exchange.getRequestBody().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+            byte[] body = "{\"id\":\"9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d\"}".getBytes();
+            exchange.sendResponseHeaders(201, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+        Path credentialFile = Files.writeString(dir.resolve("credential"), "plk_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG");
+        Path shared = Files.writeString(dir.resolve("hello.txt"), "hello");
+
+        int exitCode = PeerAgentApplication.run(new String[] {
+                "--server-url=http://127.0.0.1:" + server.getAddress().getPort(),
+                "--peer-id=" + PEER_ID,
+                "--credential-file=" + credentialFile,
+                "--data-dir=" + dir.resolve("agent"),
+                "--share=" + shared});
+
+        assertThat(exitCode).isEqualTo(PeerAgentApplication.EXIT_OK);
+        // Only metadata leaves the device: name, size and SHA-256, never the content.
+        assertThat(registration.get()).contains("\"fileName\":\"hello.txt\"").contains("\"fileSizeBytes\":5")
+                .contains("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824").doesNotContain("\"hello\"");
+        assertThat(Files.readString(dir.resolve("agent/shared-files-" + PEER_ID + ".properties")))
+                .contains("9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d");
+    }
+
+    @Test
+    void shareModeFailsWithCode6ForAMissingFile(@TempDir Path dir) throws IOException {
+        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        server.createContext("/api/health", exchange -> {
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        server.start();
+        Path credentialFile = Files.writeString(dir.resolve("credential"), "plk_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG");
+
+        assertThat(PeerAgentApplication.run(new String[] {
+                "--server-url=http://127.0.0.1:" + server.getAddress().getPort(), "--peer-id=" + PEER_ID,
+                "--credential-file=" + credentialFile, "--share=" + dir.resolve("missing.txt")}))
+                .isEqualTo(PeerAgentApplication.EXIT_SHARE_FAILED);
+    }
 }

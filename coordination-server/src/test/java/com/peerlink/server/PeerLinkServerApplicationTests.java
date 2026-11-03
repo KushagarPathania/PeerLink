@@ -44,7 +44,7 @@ class PeerLinkServerApplicationTests extends PostgresContainerSupport {
     void flywayAppliesAllMigrationsAndTheyValidate() {
         assertThat(flyway.info().applied())
                 .extracting(migration -> migration.getVersion().getVersion())
-                .containsExactly("1", "2", "3", "4");
+                .containsExactly("1", "2", "3", "4", "5");
         assertThat(flyway.info().pending()).isEmpty();
         assertThat(flyway.validateWithResult().validationSuccessful).isTrue();
     }

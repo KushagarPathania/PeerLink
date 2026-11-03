@@ -48,16 +48,24 @@ public class PeerPresenceService {
      */
     @Transactional
     public HeartbeatResponse recordHeartbeat(UUID peerId, PeerAgentPrincipal agent, InetAddress observedAddress) {
-        return recordHeartbeat(peerId, agent, observedAddress, null);
+        return recordHeartbeat(peerId, agent, observedAddress, null, null);
     }
 
-    /**
-     * @param listeningPort the port the agent reports listening on, or {@code null} to keep the
-     *                      registered one; the address is always the observed one
-     */
     @Transactional
     public HeartbeatResponse recordHeartbeat(UUID peerId, PeerAgentPrincipal agent, InetAddress observedAddress,
                                              Integer listeningPort) {
+        return recordHeartbeat(peerId, agent, observedAddress, listeningPort, null);
+    }
+
+    /**
+     * @param listeningPort        the port the agent reports listening on, or {@code null} to keep
+     *                             the registered one; the address is always the observed one
+     * @param tlsCertificateSha256 fingerprint of the certificate the agent's listener presents, or
+     *                             {@code null} to keep the current one
+     */
+    @Transactional
+    public HeartbeatResponse recordHeartbeat(UUID peerId, PeerAgentPrincipal agent, InetAddress observedAddress,
+                                             Integer listeningPort, String tlsCertificateSha256) {
         if (!agent.peerId().equals(peerId)) {
             throw new AccessDeniedException("This credential is not valid for the requested peer");
         }
@@ -68,6 +76,9 @@ public class PeerPresenceService {
             peer.recordHeartbeat(address, now);
         } else {
             peer.recordHeartbeat(address, listeningPort, now);
+        }
+        if (tlsCertificateSha256 != null) {
+            peer.updateTlsCertificate(tlsCertificateSha256);
         }
         return new HeartbeatResponse(peer.getId(), PeerStatus.ONLINE, now, address.getHostAddress(),
                 properties.heartbeatInterval().toSeconds(), properties.staleTimeout().toSeconds());

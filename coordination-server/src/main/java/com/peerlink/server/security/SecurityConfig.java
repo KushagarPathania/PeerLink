@@ -88,10 +88,16 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/api/health", "/api/auth/csrf").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/auth/register", "/api/auth/login", "/api/auth/logout")
                         .permitAll()
-                        // Peer agents (bearer credential) may send heartbeats and broker direct
-                        // connections for their own peer, and nothing else.
+                        // Peer agents (bearer credential) may send heartbeats, broker direct
+                        // connections, register shared files and report transfers for their own
+                        // peer, and nothing else.
                         .requestMatchers(HttpMethod.POST, "/api/peers/*/heartbeat", "/api/peers/*/connections",
-                                "/api/peers/*/connections/redeem", "/api/peers/*/connections/*/outcome")
+                                "/api/peers/*/connections/redeem", "/api/peers/*/connections/*/outcome",
+                                "/api/peers/*/files", "/api/peers/*/transfers/*/progress",
+                                "/api/peers/*/transfers/*/complete", "/api/peers/*/transfers/*/fail",
+                                "/api/peers/*/transfers/*/reject")
+                        .hasRole("PEER_AGENT")
+                        .requestMatchers(HttpMethod.GET, "/api/peers/*/transfers/next", "/api/peers/*/transfers/*")
                         .hasRole("PEER_AGENT")
                         // Reserved for administrative endpoints; no user has this role yet.
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")

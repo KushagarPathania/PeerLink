@@ -29,10 +29,15 @@ import java.util.UUID;
  * @param listenEnabled     whether a configured peer also accepts direct connections
  * @param maxConnections    simultaneous incoming peer connections
  * @param connectTo         when set, run a single connection test to this peer and exit
+ * @param dataDirectory     private agent data (the list of files shared from this device)
+ * @param maxFileSizeBytes  largest file this device sends or accepts
+ * @param maxTransfers      simultaneous uploads, and separately simultaneous downloads
+ * @param sharePath         when set, share this file and exit
  */
 public record AgentConfig(URI serverUrl, int listenPort, Path downloadDirectory, UUID peerId,
                           AgentCredential credential, Duration heartbeatInterval, InetAddress listenHost,
-                          boolean listenEnabled, int maxConnections, UUID connectTo) {
+                          boolean listenEnabled, int maxConnections, UUID connectTo, Path dataDirectory,
+                          long maxFileSizeBytes, int maxTransfers, Path sharePath) {
 
     public static final String DEFAULT_SERVER_URL = "http://localhost:8080";
     public static final int DEFAULT_LISTEN_PORT = 9090;
@@ -40,6 +45,9 @@ public record AgentConfig(URI serverUrl, int listenPort, Path downloadDirectory,
     static final int MAX_HEARTBEAT_SECONDS = 3600;
     public static final int DEFAULT_MAX_CONNECTIONS = 8;
     static final int MAX_CONNECTIONS_LIMIT = 64;
+    public static final long DEFAULT_MAX_FILE_SIZE = 1024L * 1024 * 1024;
+    public static final int DEFAULT_MAX_TRANSFERS = 2;
+    static final int MAX_TRANSFERS_LIMIT = 16;
 
     static final String OPT_SERVER_URL = "server-url";
     static final String OPT_PORT = "port";
@@ -51,6 +59,10 @@ public record AgentConfig(URI serverUrl, int listenPort, Path downloadDirectory,
     static final String OPT_LISTEN = "listen";
     static final String OPT_MAX_CONNECTIONS = "max-connections";
     static final String OPT_CONNECT_TO = "connect-to";
+    static final String OPT_DATA_DIR = "data-dir";
+    static final String OPT_MAX_FILE_SIZE = "max-file-size";
+    static final String OPT_MAX_TRANSFERS = "max-transfers";
+    static final String OPT_SHARE = "share";
     static final String ENV_SERVER_URL = "PEERLINK_SERVER_URL";
     static final String ENV_PORT = "PEERLINK_AGENT_PORT";
     static final String ENV_DOWNLOAD_DIR = "PEERLINK_DOWNLOAD_DIR";
@@ -61,10 +73,13 @@ public record AgentConfig(URI serverUrl, int listenPort, Path downloadDirectory,
     static final String ENV_LISTEN_HOST = "PEERLINK_LISTEN_HOST";
     static final String ENV_LISTEN = "PEERLINK_LISTEN_ENABLED";
     static final String ENV_MAX_CONNECTIONS = "PEERLINK_MAX_CONNECTIONS";
+    static final String ENV_DATA_DIR = "PEERLINK_DATA_DIR";
+    static final String ENV_MAX_FILE_SIZE = "PEERLINK_MAX_FILE_SIZE";
+    static final String ENV_MAX_TRANSFERS = "PEERLINK_MAX_TRANSFERS";
 
     private static final Set<String> KNOWN_OPTIONS = Set.of(OPT_SERVER_URL, OPT_PORT, OPT_DOWNLOAD_DIR, OPT_PEER_ID,
             OPT_CREDENTIAL_FILE, OPT_HEARTBEAT_INTERVAL, OPT_LISTEN_HOST, OPT_LISTEN, OPT_MAX_CONNECTIONS,
-            OPT_CONNECT_TO);
+            OPT_CONNECT_TO, OPT_DATA_DIR, OPT_MAX_FILE_SIZE, OPT_MAX_TRANSFERS, OPT_SHARE);
 
     public AgentConfig {
         if (listenPort < 1 || listenPort > 65535) {
@@ -90,6 +105,22 @@ public record AgentConfig(URI serverUrl, int listenPort, Path downloadDirectory,
         if (connectTo != null && connectTo.equals(peerId)) {
             throw new IllegalArgumentException("--connect-to must name another peer");
         }
+        if (sharePath != null && peerId == null) {
+            throw new IllegalArgumentException("--share needs this device's peer id and agent credential");
+        }
+        if (sharePath != null && connectTo != null) {
+            throw new IllegalArgumentException("--share and --connect-to cannot be combined");
+        }
+        if (maxFileSizeBytes < 1) {
+            throw new IllegalArgumentException("Max file size must be positive");
+        }
+        if (maxTransfers < 1 || maxTransfers > MAX_TRANSFERS_LIMIT) {
+            throw new IllegalArgumentException("Max transfers must be between 1 and " + MAX_TRANSFERS_LIMIT
+                    + ", got " + maxTransfers);
+        }
+        if (dataDirectory == null) {
+            throw new IllegalArgumentException("Data directory is required");
+        }
     }
 
     /** True when a peer is configured, i.e. the agent should keep that peer online. */
@@ -113,11 +144,43 @@ public record AgentConfig(URI serverUrl, int listenPort, Path downloadDirectory,
         String maxConnections = lookup(options, env, OPT_MAX_CONNECTIONS, ENV_MAX_CONNECTIONS,
                 String.valueOf(DEFAULT_MAX_CONNECTIONS));
 
+        String dataDir = lookup(options, env, OPT_DATA_DIR, ENV_DATA_DIR,
+                Path.of(System.getProperty("user.home"), "PeerLink", "agent").toString());
+        String maxFileSize = lookup(options, env, OPT_MAX_FILE_SIZE, ENV_MAX_FILE_SIZE,
+                String.valueOf(DEFAULT_MAX_FILE_SIZE));
+        String maxTransfers = lookup(options, env, OPT_MAX_TRANSFERS, ENV_MAX_TRANSFERS,
+                String.valueOf(DEFAULT_MAX_TRANSFERS));
+        String share = options.get(OPT_SHARE);
+
         return new AgentConfig(parseServerUrl(serverUrl), parsePort(port),
                 Path.of(downloadDir).toAbsolutePath().normalize(), parsePeerId(peerId),
                 resolveCredential(options, env), parseHeartbeatInterval(heartbeat), parseListenHost(listenHost),
                 parseBoolean(OPT_LISTEN, listen), parseInt(OPT_MAX_CONNECTIONS, maxConnections),
-                parsePeerId(options.get(OPT_CONNECT_TO)));
+                parsePeerId(options.get(OPT_CONNECT_TO)), Path.of(dataDir).toAbsolutePath().normalize(),
+                parseSize(OPT_MAX_FILE_SIZE, maxFileSize), parseInt(OPT_MAX_TRANSFERS, maxTransfers),
+                share == null || share.isBlank() ? null : Path.of(share));
+    }
+
+    /** Bytes, or a number with K/M/G (or KiB/MiB/GiB) suffix, in binary units: "1GiB", "500M". */
+    static long parseSize(String option, String value) {
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("(?i)([0-9]{1,13})\\s*(|b|k|kb|kib|m|mb|mib|g|gb|gib)").matcher(value.trim());
+        if (!matcher.matches()) {
+            throw new IllegalArgumentException("--" + option + " must be a size such as 1073741824, 500MiB or 1GiB, got '"
+                    + value + "'");
+        }
+        long number = Long.parseLong(matcher.group(1));
+        int shift = switch (matcher.group(2).toLowerCase(java.util.Locale.ROOT)) {
+            case "k", "kb", "kib" -> 10;
+            case "m", "mb", "mib" -> 20;
+            case "g", "gb", "gib" -> 30;
+            default -> 0;
+        };
+        try {
+            return Math.multiplyExact(number, 1L << shift);
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException("--" + option + " is too large", e);
+        }
     }
 
     public static String usage() {
@@ -136,13 +199,18 @@ public record AgentConfig(URI serverUrl, int listenPort, Path downloadDirectory,
                   --listen=<true|false>       Accept direct peer connections [%s] (default true)
                   --max-connections=<n>       Simultaneous incoming connections [%s] (default %d)
                   --connect-to=<peer-uuid>    Test a direct connection to that peer, then exit
+                  --share=<file>              Share that file from this device, then exit
+                  --data-dir=<path>           Private agent data [%s] (default ~/PeerLink/agent)
+                  --max-file-size=<size>      Largest file sent or accepted [%s] (default 1GiB)
+                  --max-transfers=<n>         Simultaneous uploads and downloads [%s] (default %d)
                   --help                      Show this message
 
                 The agent credential can also be given in %s. It is never accepted on the
                 command line. Without a peer id the agent only checks the server and exits.
                 """.formatted(ENV_SERVER_URL, DEFAULT_SERVER_URL, ENV_PORT, DEFAULT_LISTEN_PORT, ENV_DOWNLOAD_DIR,
                 ENV_PEER_ID, ENV_CREDENTIAL_FILE, ENV_HEARTBEAT_INTERVAL, DEFAULT_HEARTBEAT_SECONDS, ENV_LISTEN_HOST,
-                ENV_LISTEN, ENV_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS, ENV_CREDENTIAL);
+                ENV_LISTEN, ENV_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS, ENV_DATA_DIR, ENV_MAX_FILE_SIZE,
+                ENV_MAX_TRANSFERS, DEFAULT_MAX_TRANSFERS, ENV_CREDENTIAL);
     }
 
     @Override
@@ -151,7 +219,8 @@ public record AgentConfig(URI serverUrl, int listenPort, Path downloadDirectory,
                 + downloadDirectory + ", peerId=" + peerId + ", credential=" + (credential == null ? "none" : "****")
                 + ", heartbeatInterval=" + heartbeatInterval + ", listenHost=" + listenHost.getHostAddress()
                 + ", listenEnabled=" + listenEnabled + ", maxConnections=" + maxConnections + ", connectTo=" + connectTo
-                + "]";
+                + ", dataDirectory=" + dataDirectory + ", maxFileSizeBytes=" + maxFileSizeBytes + ", maxTransfers="
+                + maxTransfers + ", sharePath=" + sharePath + "]";
     }
 
     private static Map<String, String> parseOptions(String[] args) {

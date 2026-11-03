@@ -81,7 +81,8 @@ public class PeerApiController {
                                        @Valid @RequestBody(required = false) HeartbeatRequest body,
                                        HttpServletRequest request) {
         Integer listeningPort = body == null ? null : body.listeningPort();
-        return presenceService.recordHeartbeat(peerId, agent, remoteAddress(request), listeningPort);
+        String certificate = body == null ? null : body.tlsCertificateSha256();
+        return presenceService.recordHeartbeat(peerId, agent, remoteAddress(request), listeningPort, certificate);
     }
 
     @PostMapping("/{peerId}/credential")

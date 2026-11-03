@@ -28,6 +28,8 @@ import org.springframework.security.access.AccessDeniedException;
 class PeerPresenceServiceTests extends RepositoryTestSupport {
 
     private static final Instant T = Instant.parse("2020-01-01T10:00:00Z");
+    /** The whole result: peers from other test classes (real-time heartbeats) are online after T as well. */
+    private static final PageRequest ALL = PageRequest.of(0, 100_000);
     private static final PeerPresenceProperties POLICY =
             new PeerPresenceProperties(Duration.ofSeconds(15), Duration.ofSeconds(60), Duration.ofSeconds(15));
 
@@ -58,9 +60,9 @@ class PeerPresenceServiceTests extends RepositoryTestSupport {
         PeerPresenceService justAfter = serviceAt(T.plusSeconds(60).plusNanos(1_000));
 
         assertThat(peerRepository.findOnlinePeersExcludingUser(
-                atBoundary.onlineCutoff(atBoundary.now()), someoneElse, PageRequest.of(0, 50))).contains(peer);
+                atBoundary.onlineCutoff(atBoundary.now()), someoneElse, ALL)).contains(peer);
         assertThat(peerRepository.findOnlinePeersExcludingUser(
-                justAfter.onlineCutoff(justAfter.now()), someoneElse, PageRequest.of(0, 50))).doesNotContain(peer);
+                justAfter.onlineCutoff(justAfter.now()), someoneElse, ALL)).doesNotContain(peer);
     }
 
     @Test

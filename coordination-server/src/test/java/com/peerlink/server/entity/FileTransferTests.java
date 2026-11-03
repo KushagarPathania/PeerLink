@@ -122,4 +122,32 @@ class FileTransferTests {
         transfer.start(now);
         return transfer;
     }
+
+    @Test
+    void peerCanRejectBeforeDataButNotDuringTransfer() {
+        FileTransfer requested = new FileTransfer(file, receiverPeer, requester);
+        requested.reject(TransferErrorCode.FILE_TOO_LARGE, now, receiverPeer);
+
+        assertThat(requested.getStatus()).isEqualTo(TransferStatus.REJECTED);
+        assertThat(requested.getErrorCode()).isEqualTo(TransferErrorCode.FILE_TOO_LARGE);
+        assertThat(requested.getEvents()).last().satisfies(event -> {
+            assertThat(event.getReportedByPeer()).isSameAs(receiverPeer);
+            assertThat(event.getErrorCode()).isEqualTo(TransferErrorCode.FILE_TOO_LARGE);
+        });
+        assertThatIllegalStateException().isThrownBy(() -> requested.fail(TransferErrorCode.TIMEOUT, now));
+
+        FileTransfer running = inProgressTransfer();
+        assertThatIllegalStateException().isThrownBy(() -> running.reject(TransferErrorCode.PEER_BUSY, now, senderPeer));
+    }
+
+    @Test
+    void recordsWhichPeerReportedEachChange() {
+        FileTransfer transfer = new FileTransfer(file, receiverPeer, requester);
+        transfer.authorize(senderPeer);
+        transfer.start(now, receiverPeer);
+
+        assertThat(transfer.getEvents()).extracting(TransferEvent::getReportedByPeer)
+                .containsExactly(null, senderPeer, receiverPeer);
+        assertThat(transfer.isActive()).isTrue();
+    }
 }

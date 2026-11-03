@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -91,6 +92,33 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(OutcomeAlreadyReportedException.class)
     ProblemDetail handleOutcomeReported(OutcomeAlreadyReportedException ex) {
         return problem(HttpStatus.CONFLICT, ApiErrorCode.OUTCOME_ALREADY_REPORTED, ex.getMessage());
+    }
+
+    @ExceptionHandler(SharedFileNotFoundException.class)
+    ProblemDetail handleFileNotFound(SharedFileNotFoundException ex) {
+        return problem(HttpStatus.NOT_FOUND, ApiErrorCode.FILE_NOT_FOUND, ex.getMessage());
+    }
+
+    @ExceptionHandler(TransferNotFoundException.class)
+    ProblemDetail handleTransferNotFound(TransferNotFoundException ex) {
+        return problem(HttpStatus.NOT_FOUND, ApiErrorCode.TRANSFER_NOT_FOUND, ex.getMessage());
+    }
+
+    @ExceptionHandler(TransferStateConflictException.class)
+    ProblemDetail handleTransferConflict(TransferStateConflictException ex) {
+        return problem(HttpStatus.CONFLICT, ApiErrorCode.TRANSFER_STATE_CONFLICT, ex.getMessage());
+    }
+
+    @ExceptionHandler(TransferNotPossibleException.class)
+    ProblemDetail handleTransferNotPossible(TransferNotPossibleException ex) {
+        return problem(HttpStatus.CONFLICT, ApiErrorCode.TRANSFER_NOT_POSSIBLE, ex.getMessage());
+    }
+
+    /** Two reports raced on the same row (optimistic locking); the caller may retry. */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    ProblemDetail handleConcurrentModification(OptimisticLockingFailureException ex) {
+        return problem(HttpStatus.CONFLICT, ApiErrorCode.CONCURRENT_MODIFICATION,
+                "The resource was changed concurrently; please retry.");
     }
 
     @ExceptionHandler(DisabledException.class)

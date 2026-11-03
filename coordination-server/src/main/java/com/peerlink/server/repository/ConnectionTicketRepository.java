@@ -1,7 +1,9 @@
 package com.peerlink.server.repository;
 
 import com.peerlink.server.entity.ConnectionTicket;
+import com.peerlink.server.entity.ConnectionTicketStatus;
 import jakarta.persistence.LockModeType;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -20,4 +22,6 @@ public interface ConnectionTicketRepository extends JpaRepository<ConnectionTick
     Optional<ConnectionTicket> findByIdAndSourcePeerId(UUID id, UUID sourcePeerId);
 
     List<ConnectionTicket> findBySourcePeerIdOrderByIssuedAtDesc(UUID sourcePeerId);
+
+    boolean existsByTransferIdAndStatusAndExpiresAtAfter(UUID transferId, ConnectionTicketStatus status, Instant now);
 }

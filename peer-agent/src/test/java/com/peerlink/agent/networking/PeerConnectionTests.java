@@ -11,7 +11,12 @@ import com.peerlink.agent.protocol.MessageType;
 import com.peerlink.agent.protocol.RejectReason;
 import com.peerlink.agent.security.ConnectionOutcome;
 import com.peerlink.agent.security.IssuedTicket;
+import com.peerlink.agent.security.PeerTls;
 import com.peerlink.agent.security.TicketVerifier;
+import com.peerlink.agent.security.TlsIdentity;
+import com.peerlink.agent.testing.InMemoryTicketAuthority;
+import com.peerlink.agent.testing.RawPeer;
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -26,11 +31,12 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import javax.net.ssl.SSLSocket;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-/** Real sockets over loopback: agent A connects to agent B's listener. */
+/** Real TLS sockets over loopback: agent A connects to agent B's listener. */
 class PeerConnectionTests {
 
     private static final InetAddress LOOPBACK = InetAddress.getLoopbackAddress();
@@ -38,13 +44,15 @@ class PeerConnectionTests {
 
     private final UUID peerA = UUID.randomUUID();
     private final UUID peerB = UUID.randomUUID();
+    private final PeerTls tlsA = new PeerTls(TlsIdentity.generate("A"));
+    private final PeerTls tlsB = new PeerTls(TlsIdentity.generate("B"));
     private final InMemoryTicketAuthority authority = new InMemoryTicketAuthority();
     private final List<AutoCloseable> resources = new ArrayList<>();
     private PeerListener listenerB;
 
     @BeforeEach
     void startPeerB() throws Exception {
-        listenerB = startListener(peerB, authority.verifierFor(peerB), 4, Duration.ofSeconds(5));
+        listenerB = startListener(peerB, tlsB, authority.verifierFor(peerB), 4, Duration.ofSeconds(5));
     }
 
     @AfterEach
@@ -57,12 +65,12 @@ class PeerConnectionTests {
     // --- Successful connections --------------------------------------------------------
 
     @Test
-    void twoAgentsCompleteHandshakeAndConnectionTest() {
+    void twoAgentsCompleteHandshakeAndConnectionTestOverTls() {
         ConnectionTestResult result = connectorA().testConnection(peerB);
 
         assertThat(result.outcome()).isEqualTo(Outcome.SUCCEEDED);
         assertThat(result.roundTrip()).isNotNull().isPositive();
-        assertThat(result.detail()).contains(peerB.toString());
+        assertThat(result.detail()).contains(peerB.toString()).contains("TLS 1.3");
         assertThat(authority.reportedOutcomes).containsExactly(ConnectionOutcome.SUCCEEDED);
     }
 
@@ -72,8 +80,9 @@ class PeerConnectionTests {
         List<Callable<ConnectionTestResult>> attempts = new ArrayList<>();
         for (int i = 0; i < 4; i++) {
             UUID source = UUID.randomUUID();
-            attempts.add(() -> new PeerConnector(source, authority.issuerFor(source), PeerConnector.Settings.defaults())
-                    .testConnection(peerB));
+            PeerTls tls = new PeerTls(TlsIdentity.generate("source-" + i));
+            attempts.add(() -> new PeerConnector(source, authority.issuerFor(source, tls.identity().fingerprint()), tls,
+                    PeerConnector.Settings.defaults()).testConnection(peerB));
         }
         List<ConnectionTestResult> results = new ArrayList<>();
         for (Future<ConnectionTestResult> future : pool.invokeAll(attempts)) {
@@ -84,11 +93,11 @@ class PeerConnectionTests {
         assertThat(results).extracting(ConnectionTestResult::outcome).containsOnly(Outcome.SUCCEEDED);
     }
 
-    // --- Authorization -----------------------------------------------------------------
+    // --- Authorization and identity ------------------------------------------------------
 
     @Test
     void invalidOrRevokedTicketIsRejected() {
-        IssuedTicket ticket = authority.issueTicket(peerA, peerB, addressOf(listenerB));
+        IssuedTicket ticket = ticketFromAToB();
         authority.revokeAll();
 
         ConnectionTestResult result = connectorA().connect(ticket);
@@ -99,7 +108,7 @@ class PeerConnectionTests {
 
     @Test
     void expiredTicketIsRejected() {
-        IssuedTicket ticket = authority.issueTicket(peerA, peerB, addressOf(listenerB));
+        IssuedTicket ticket = ticketFromAToB();
         authority.expireAll();
 
         assertThat(connectorA().connect(ticket).outcome()).isEqualTo(Outcome.REJECTED_BY_PEER);
@@ -107,7 +116,7 @@ class PeerConnectionTests {
 
     @Test
     void replayedTicketIsRejected() {
-        IssuedTicket ticket = authority.issueTicket(peerA, peerB, addressOf(listenerB));
+        IssuedTicket ticket = ticketFromAToB();
 
         assertThat(connectorA().connect(ticket).outcome()).isEqualTo(Outcome.SUCCEEDED);
         assertThat(connectorA().connect(ticket).outcome()).isEqualTo(Outcome.REJECTED_BY_PEER);
@@ -115,53 +124,108 @@ class PeerConnectionTests {
 
     @Test
     void ticketForAnotherTargetIsRejected() {
-        // A ticket meant for peer C, presented to B (e.g. by someone who intercepted it).
-        IssuedTicket forC = authority.issueTicket(peerA, UUID.randomUUID(), addressOf(listenerB));
+        IssuedTicket forC = authority.issueTicket(peerA, fingerprint(tlsA), UUID.randomUUID(), addressOf(listenerB),
+                fingerprint(tlsB), null);
 
-        ConnectionTestResult result = connectorA().connect(forC);
-
-        assertThat(result.outcome()).isEqualTo(Outcome.REJECTED_BY_PEER);
+        assertThat(connectorA().connect(forC).outcome()).isEqualTo(Outcome.REJECTED_BY_PEER);
     }
 
     @Test
     void claimingAnotherPeersIdentityIsRejected() throws Exception {
-        IssuedTicket ticketOfA = authority.issueTicket(peerA, peerB, addressOf(listenerB));
-        UUID impostor = UUID.randomUUID();
+        IssuedTicket ticketOfA = ticketFromAToB();
 
-        try (RawPeer raw = rawPeer()) {
-            raw.magic().send(Handshake.hello(impostor, ticketOfA.ticket()));
+        try (RawPeer raw = rawPeer(tlsA)) {
+            raw.magic().send(Handshake.hello(UUID.randomUUID(), ticketOfA.ticket()));
             assertRejected(raw.receive(), RejectReason.UNAUTHORIZED);
         }
     }
 
     @Test
-    void responderThatCannotProveItsIdentityIsRefused() throws Exception {
-        // An impostor listening where B should be: it accepts the handshake but cannot know B's proof.
+    void stolenTicketPresentedWithAnotherTlsKeyIsRejected() throws Exception {
+        // The ticket is bound to A's certificate; someone else holding it cannot use it.
+        IssuedTicket ticketOfA = ticketFromAToB();
+        PeerTls thief = new PeerTls(TlsIdentity.generate("thief"));
+
+        try (RawPeer raw = rawPeer(thief)) {
+            raw.magic().send(Handshake.hello(peerA, ticketOfA.ticket()));
+            assertRejected(raw.receive(), RejectReason.UNAUTHORIZED);
+        }
+    }
+
+    @Test
+    void stolenTicketPresentedWithAnotherKeyDoesNotBurnTheLegitimateConnection() throws Exception {
+        IssuedTicket ticketOfA = ticketFromAToB();
+        try (RawPeer raw = rawPeer(new PeerTls(TlsIdentity.generate("thief")))) {
+            raw.magic().send(Handshake.hello(peerA, ticketOfA.ticket()));
+            assertRejected(raw.receive(), RejectReason.UNAUTHORIZED);
+        }
+        assertThat(authority.refusedForCertificate.get()).isEqualTo(1);
+
+        // A, with its own key, can still use the very same ticket.
+        assertThat(connectorA().connect(ticketOfA).outcome()).isEqualTo(Outcome.SUCCEEDED);
+    }
+
+    @Test
+    void listenerChecksTheCertificateItselfEvenIfTheServerDidNot() throws Exception {
+        authority.presentedWithAnotherCertificateAllowed = true; // a server that skips its check
+        IssuedTicket ticketOfA = ticketFromAToB();
+        try (RawPeer raw = rawPeer(new PeerTls(TlsIdentity.generate("thief")))) {
+            raw.magic().send(Handshake.hello(peerA, ticketOfA.ticket()));
+            assertRejected(raw.receive(), RejectReason.UNAUTHORIZED);
+        }
+    }
+
+    @Test
+    void impostorWithItsOwnCertificateFailsTheTlsHandshake() throws Exception {
+        PeerTls impostorTls = new PeerTls(TlsIdentity.generate("impostor"));
         try (ServerSocket impostor = new ServerSocket(0, 5, LOOPBACK)) {
             Thread.ofVirtual().start(() -> {
-                try (Socket socket = impostor.accept()) {
+                try (SSLSocket socket = impostorTls.serverSide(impostor.accept())) {
+                    socket.startHandshake();
+                } catch (IOException e) {
+                    // the connector aborts the handshake
+                }
+            });
+            IssuedTicket ticket = authority.issueTicket(peerA, fingerprint(tlsA), peerB,
+                    new InetSocketAddress(LOOPBACK, impostor.getLocalPort()), fingerprint(tlsB), null);
+
+            ConnectionTestResult result = connectorA().connect(ticket);
+
+            assertThat(result.outcome()).isEqualTo(Outcome.PEER_IDENTITY_MISMATCH);
+            assertThat(result.detail()).contains("TLS certificate");
+        }
+    }
+
+    @Test
+    void responderWithTheRightKeyButWithoutTheServerProofIsRefused() throws Exception {
+        // Even holding B's TLS key, a responder that cannot redeem the ticket cannot know the proof.
+        try (ServerSocket impostor = new ServerSocket(0, 5, LOOPBACK)) {
+            Thread.ofVirtual().start(() -> {
+                try (SSLSocket socket = tlsB.serverSide(impostor.accept())) {
+                    socket.startHandshake();
                     InputStream in = socket.getInputStream();
                     FrameIO.readMagic(in);
                     FrameIO.readFrame(in);
-                    FrameIO.writeFrame(socket.getOutputStream(),
-                            MessageCodec.encode(Handshake.helloAck(1, peerB, "x".repeat(43))));
+                    FrameIO.writeControl(socket.getOutputStream(),
+                            MessageCodec.encode(Handshake.helloAck(2, peerB, "x".repeat(43))));
                     in.read();
                 } catch (Exception e) {
                     // the test only cares about the connector's verdict
                 }
             });
-            IssuedTicket ticket = authority.issueTicket(peerA, peerB,
-                    new InetSocketAddress(LOOPBACK, impostor.getLocalPort()));
+            IssuedTicket ticket = authority.issueTicket(peerA, fingerprint(tlsA), peerB,
+                    new InetSocketAddress(LOOPBACK, impostor.getLocalPort()), fingerprint(tlsB), null);
 
             ConnectionTestResult result = connectorA().connect(ticket);
 
             assertThat(result.outcome()).isEqualTo(Outcome.PEER_IDENTITY_MISMATCH);
+            assertThat(result.detail()).contains("could not prove");
         }
     }
 
     @Test
-    void unverifiableTicketFailsClosedWhenServerIsDown() throws Exception {
-        IssuedTicket ticket = authority.issueTicket(peerA, peerB, addressOf(listenerB));
+    void unverifiableTicketFailsClosedWhenServerIsDown() {
+        IssuedTicket ticket = ticketFromAToB();
         authority.serverDown = true;
 
         ConnectionTestResult result = connectorA().connect(ticket);
@@ -182,9 +246,9 @@ class PeerConnectionTests {
 
     @Test
     void unsupportedVersionIsRejected() throws Exception {
-        IssuedTicket ticket = authority.issueTicket(peerA, peerB, addressOf(listenerB));
-        try (RawPeer raw = rawPeer()) {
-            raw.magic().send(Message.of(MessageType.HELLO, "versions", "2,3", "peerId", peerA.toString(),
+        IssuedTicket ticket = ticketFromAToB();
+        try (RawPeer raw = rawPeer(tlsA)) {
+            raw.magic().send(Message.of(MessageType.HELLO, "versions", "1,3", "peerId", peerA.toString(),
                     "ticket", ticket.ticket()));
             assertRejected(raw.receive(), RejectReason.UNSUPPORTED_VERSION);
         }
@@ -192,7 +256,7 @@ class PeerConnectionTests {
 
     @Test
     void unknownMessageTypeIsRejected() throws Exception {
-        try (RawPeer raw = rawPeer()) {
+        try (RawPeer raw = rawPeer(tlsA)) {
             raw.magic().frame("type=SEND_FILE\n");
             assertRejected(raw.receive(), RejectReason.UNKNOWN_MESSAGE_TYPE);
         }
@@ -200,25 +264,35 @@ class PeerConnectionTests {
 
     @Test
     void malformedIdentityIsRejected() throws Exception {
-        try (RawPeer raw = rawPeer()) {
-            raw.magic().frame("type=HELLO\nversions=1\npeerId=../../etc\nticket=plt_x\n");
+        try (RawPeer raw = rawPeer(tlsA)) {
+            raw.magic().frame("type=HELLO\nversions=2\npeerId=../../etc\nticket=plt_x\n");
             assertRejected(raw.receive(), RejectReason.MALFORMED);
         }
     }
 
     @Test
     void oversizedFrameIsRejectedWithoutReadingIt() throws Exception {
-        try (RawPeer raw = rawPeer()) {
-            raw.magic().raw(ByteBuffer.allocate(4).putInt(50 * 1024 * 1024).array());
+        try (RawPeer raw = rawPeer(tlsA)) {
+            raw.magic().raw(ByteBuffer.allocate(5).put(FrameIO.CONTROL).putInt(50 * 1024 * 1024).array());
             assertRejected(raw.receive(), RejectReason.FRAME_TOO_LARGE);
         }
     }
 
     @Test
-    void nonPeerLinkTrafficIsRejectedAndTheListenerKeepsWorking() throws Exception {
-        try (RawPeer raw = rawPeer()) {
-            raw.raw("GET / HTTP/1.1\r\nHost: x\r\n\r\n".getBytes());
-            assertThat(raw.closedByRemote()).isTrue();
+    void dataFrameBeforeTheHandshakeIsRejected() throws Exception {
+        try (RawPeer raw = rawPeer(tlsA)) {
+            raw.magic().data(0, new byte[] {1, 2, 3});
+            assertRejected(raw.receive(), RejectReason.UNEXPECTED_MESSAGE);
+        }
+    }
+
+    @Test
+    void plaintextTrafficIsRefusedAndTheListenerKeepsWorking() throws Exception {
+        try (Socket plain = new Socket()) {
+            plain.connect(addressOf(listenerB), 2000);
+            plain.setSoTimeout(5000);
+            plain.getOutputStream().write("GET / HTTP/1.1\r\nHost: x\r\n\r\n".getBytes());
+            assertThat(drainUntilClosed(plain)).isTrue();
         }
 
         assertThat(connectorA().testConnection(peerB).outcome()).isEqualTo(Outcome.SUCCEEDED);
@@ -226,8 +300,8 @@ class PeerConnectionTests {
 
     @Test
     void clientDisconnectingMidHandshakeDoesNotAffectOthers() throws Exception {
-        try (RawPeer raw = rawPeer()) {
-            raw.magic().raw(new byte[] {0, 0, 0, 40, 't', 'y', 'p'}); // promises 40 bytes, sends 3
+        try (RawPeer raw = rawPeer(tlsA)) {
+            raw.magic().raw(new byte[] {FrameIO.CONTROL, 0, 0, 0, 40, 't', 'y', 'p'}); // promises 40 bytes, sends 3
         }
 
         assertThat(connectorA().testConnection(peerB).outcome()).isEqualTo(Outcome.SUCCEEDED);
@@ -236,7 +310,7 @@ class PeerConnectionTests {
 
     @Test
     void messagesOutOfOrderEndTheConnection() throws Exception {
-        try (RawPeer raw = rawPeer()) {
+        try (RawPeer raw = rawPeer(tlsA)) {
             raw.magic().send(Handshake.ping("abc"));
             assertRejected(raw.receive(), RejectReason.UNEXPECTED_MESSAGE);
         }
@@ -244,10 +318,7 @@ class PeerConnectionTests {
 
     @Test
     void connectionTestsPerConnectionAreLimited() throws Exception {
-        IssuedTicket ticket = authority.issueTicket(peerA, peerB, addressOf(listenerB));
-        try (RawPeer raw = rawPeer()) {
-            raw.magic().send(Handshake.hello(peerA, ticket.ticket()));
-            assertThat(raw.receive().type()).isEqualTo(MessageType.HELLO_ACK);
+        try (RawPeer raw = establish(addressOf(listenerB), tlsB)) {
             for (int i = 0; i < 16; i++) {
                 raw.send(Handshake.ping("n" + i));
                 assertThat(Handshake.nonce(raw.receive())).isEqualTo("n" + i);
@@ -267,7 +338,8 @@ class PeerConnectionTests {
         try (ServerSocket probe = new ServerSocket(0, 1, LOOPBACK)) {
             freePort = probe.getLocalPort();
         }
-        IssuedTicket ticket = authority.issueTicket(peerA, peerB, new InetSocketAddress(LOOPBACK, freePort));
+        IssuedTicket ticket = authority.issueTicket(peerA, fingerprint(tlsA), peerB,
+                new InetSocketAddress(LOOPBACK, freePort), fingerprint(tlsB), null);
 
         ConnectionTestResult result = connectorA().connect(ticket);
 
@@ -278,8 +350,9 @@ class PeerConnectionTests {
     @Test
     void connectTimeoutIsBounded() {
         // 10.255.255.1 is non-routable: the attempt either times out or fails at once, never hangs.
-        IssuedTicket ticket = authority.issueTicket(peerA, peerB, new InetSocketAddress("10.255.255.1", 9));
-        PeerConnector connector = new PeerConnector(peerA, authority.issuerFor(peerA),
+        IssuedTicket ticket = authority.issueTicket(peerA, fingerprint(tlsA), peerB,
+                new InetSocketAddress("10.255.255.1", 9), fingerprint(tlsB), null);
+        PeerConnector connector = new PeerConnector(peerA, authority.issuerFor(peerA, fingerprint(tlsA)), tlsA,
                 new PeerConnector.Settings(Duration.ofMillis(300), SHORT));
 
         long start = System.nanoTime();
@@ -299,37 +372,41 @@ class PeerConnectionTests {
                     // closed at the end of the test
                 }
             });
-            IssuedTicket ticket = authority.issueTicket(peerA, peerB,
-                    new InetSocketAddress(LOOPBACK, silent.getLocalPort()));
-            PeerConnector connector = new PeerConnector(peerA, authority.issuerFor(peerA),
+            IssuedTicket ticket = authority.issueTicket(peerA, fingerprint(tlsA), peerB,
+                    new InetSocketAddress(LOOPBACK, silent.getLocalPort()), fingerprint(tlsB), null);
+            PeerConnector connector = new PeerConnector(peerA, authority.issuerFor(peerA, fingerprint(tlsA)), tlsA,
                     new PeerConnector.Settings(Duration.ofSeconds(2), SHORT));
 
             long start = System.nanoTime();
             ConnectionTestResult result = connector.connect(ticket);
 
             assertThat(result.outcome()).isEqualTo(Outcome.TIMEOUT);
-            assertThat(result.detail()).contains("No reply");
             assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(3));
         }
     }
 
     @Test
     void listenerDropsClientsThatStallOrTrickleDuringTheHandshake() throws Exception {
-        PeerListener strict = startListener(peerB, authority.verifierFor(peerB), 2, SHORT);
+        PeerTls strictTls = new PeerTls(TlsIdentity.generate("strict"));
+        PeerListener strict = startListener(peerB, strictTls, authority.verifierFor(peerB), 2, SHORT);
         InetSocketAddress address = addressOf(strict);
 
-        try (RawPeer silent = new RawPeer(address)) {
+        // Never even starts TLS.
+        try (Socket silent = new Socket()) {
+            silent.connect(address, 2000);
+            silent.setSoTimeout(5000);
             long start = System.nanoTime();
-            assertThat(silent.closedByRemote()).isTrue();
+            assertThat(drainUntilClosed(silent)).isTrue();
             assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(3));
         }
-        try (RawPeer trickle = new RawPeer(address)) {
+        // Completes TLS, then trickles one byte at a time.
+        try (RawPeer trickle = new RawPeer(address, tlsA, fingerprint(strictTls))) {
             long start = System.nanoTime();
             trickle.magic();
-            for (int i = 0; i < 10 && !Thread.currentThread().isInterrupted(); i++) {
+            for (int i = 0; i < 10; i++) {
                 try {
-                    trickle.raw(new byte[] {0});
-                } catch (java.io.IOException e) {
+                    trickle.raw(new byte[] {FrameIO.CONTROL});
+                } catch (IOException e) {
                     break; // closed by the listener, as intended
                 }
                 Thread.sleep(100);
@@ -342,21 +419,21 @@ class PeerConnectionTests {
 
     @Test
     void connectionLimitRejectsExtraConnectionsAndRecovers() throws Exception {
-        PeerListener limited = startListener(peerB, authority.verifierFor(peerB), 2, Duration.ofSeconds(5));
+        PeerTls limitedTls = new PeerTls(TlsIdentity.generate("limited"));
+        PeerListener limited = startListener(peerB, limitedTls, authority.verifierFor(peerB), 2, Duration.ofSeconds(5));
         InetSocketAddress address = addressOf(limited);
-        RawPeer first = establish(address);
-        RawPeer second = establish(address);
+        RawPeer first = establish(address, limitedTls);
+        RawPeer second = establish(address, limitedTls);
         awaitActive(limited, 2);
 
-        try (RawPeer third = new RawPeer(address)) {
-            third.magic().send(Handshake.hello(peerA, authority.issueTicket(peerA, peerB, address).ticket()));
+        try (RawPeer third = new RawPeer(address, tlsA, fingerprint(limitedTls))) {
             assertRejected(third.receive(), RejectReason.BUSY);
         }
 
         first.send(Handshake.bye(null));
         first.close();
         awaitActive(limited, 1);
-        try (RawPeer fourth = establish(address)) {
+        try (RawPeer fourth = establish(address, limitedTls)) {
             assertThat(fourth).isNotNull();
         }
         second.close();
@@ -364,17 +441,18 @@ class PeerConnectionTests {
 
     @Test
     void verifierFailureIsContainedAndListenerContinues() throws Exception {
-        TicketVerifier exploding = ticket -> {
+        TicketVerifier exploding = (ticket, certificate) -> {
             throw new IllegalStateException("bug in verifier");
         };
-        PeerListener fragile = startListener(peerB, exploding, 2, Duration.ofSeconds(5));
+        PeerTls fragileTls = new PeerTls(TlsIdentity.generate("fragile"));
+        PeerListener fragile = startListener(peerB, fragileTls, exploding, 2, Duration.ofSeconds(5));
         InetSocketAddress address = addressOf(fragile);
 
-        try (RawPeer raw = new RawPeer(address)) {
-            raw.magic().send(Handshake.hello(peerA, authority.issueTicket(peerA, peerB, address).ticket()));
+        try (RawPeer raw = new RawPeer(address, tlsA, fingerprint(fragileTls))) {
+            raw.magic().send(Handshake.hello(peerA, ticketFromAToB().ticket()));
             assertRejected(raw.receive(), RejectReason.INTERNAL_ERROR);
         }
-        try (RawPeer raw = new RawPeer(address)) {
+        try (RawPeer raw = new RawPeer(address, tlsA, fingerprint(fragileTls))) {
             raw.magic().frame("type=NOPE\n");
             assertRejected(raw.receive(), RejectReason.UNKNOWN_MESSAGE_TYPE);
         }
@@ -384,9 +462,10 @@ class PeerConnectionTests {
 
     @Test
     void closeStopsAcceptingClosesConnectionsAndReleasesThePort() throws Exception {
-        PeerListener listener = startListener(peerB, authority.verifierFor(peerB), 2, Duration.ofSeconds(5));
+        PeerTls closingTls = new PeerTls(TlsIdentity.generate("closing"));
+        PeerListener listener = startListener(peerB, closingTls, authority.verifierFor(peerB), 2, Duration.ofSeconds(5));
         InetSocketAddress address = addressOf(listener);
-        RawPeer established = establish(address);
+        RawPeer established = establish(address, closingTls);
 
         listener.close();
 
@@ -403,35 +482,59 @@ class PeerConnectionTests {
 
     // --- Helpers ----------------------------------------------------------------------
 
-    private PeerListener startListener(UUID self, TicketVerifier verifier, int maxConnections, Duration handshakeTimeout)
-            throws Exception {
+    private PeerListener startListener(UUID self, PeerTls tls, TicketVerifier verifier, int maxConnections,
+                                       Duration handshakeTimeout) throws Exception {
         PeerListener listener = new PeerListener(new PeerListener.Settings(LOOPBACK, 0, maxConnections),
-                new InboundConnectionHandler(self, verifier, handshakeTimeout, Duration.ofSeconds(5)));
+                new InboundConnectionHandler(self, verifier, tls, null, handshakeTimeout, Duration.ofSeconds(5)), tls);
         listener.start();
         resources.add(listener);
-        authority.register(self, addressOf(listener));
+        authority.register(self, addressOf(listener), fingerprint(tls));
         return listener;
     }
 
     private PeerConnector connectorA() {
-        return new PeerConnector(peerA, authority.issuerFor(peerA), PeerConnector.Settings.defaults());
+        return new PeerConnector(peerA, authority.issuerFor(peerA, fingerprint(tlsA)), tlsA,
+                PeerConnector.Settings.defaults());
     }
 
-    private RawPeer rawPeer() throws Exception {
-        return new RawPeer(addressOf(listenerB));
+    private IssuedTicket ticketFromAToB() {
+        return authority.issueTicket(peerA, fingerprint(tlsA), peerB, addressOf(listenerB), fingerprint(tlsB), null);
     }
 
-    /** Completes a handshake and leaves the connection open (idle). */
-    private RawPeer establish(InetSocketAddress address) throws Exception {
-        RawPeer raw = new RawPeer(address);
+    private RawPeer rawPeer(PeerTls clientTls) throws Exception {
+        RawPeer raw = new RawPeer(addressOf(listenerB), clientTls, fingerprint(tlsB));
         resources.add(raw);
-        raw.magic().send(Handshake.hello(peerA, authority.issueTicket(peerA, peerB, address).ticket()));
+        return raw;
+    }
+
+    /** Completes a handshake as peer A and leaves the connection open (idle). */
+    private RawPeer establish(InetSocketAddress address, PeerTls listenerTls) throws Exception {
+        RawPeer raw = new RawPeer(address, tlsA, fingerprint(listenerTls));
+        resources.add(raw);
+        IssuedTicket ticket = authority.issueTicket(peerA, fingerprint(tlsA), peerB, address, fingerprint(listenerTls), null);
+        raw.magic().send(Handshake.hello(peerA, ticket.ticket()));
         assertThat(raw.receive().type()).isEqualTo(MessageType.HELLO_ACK);
         return raw;
     }
 
+    private static String fingerprint(PeerTls tls) {
+        return tls.identity().fingerprint();
+    }
+
     private static InetSocketAddress addressOf(PeerListener listener) {
         return new InetSocketAddress(LOOPBACK, listener.port());
+    }
+
+    private static boolean drainUntilClosed(Socket socket) {
+        try {
+            byte[] buffer = new byte[256];
+            while (socket.getInputStream().read(buffer) >= 0) {
+                // drain
+            }
+            return true;
+        } catch (IOException e) {
+            return String.valueOf(e.getMessage()).toLowerCase().contains("reset");
+        }
     }
 
     private static void assertRejected(Message message, RejectReason reason) {
@@ -450,5 +553,4 @@ class PeerConnectionTests {
     private static void awaitIdle(PeerListener listener) throws InterruptedException {
         awaitActive(listener, 0);
     }
-
 }

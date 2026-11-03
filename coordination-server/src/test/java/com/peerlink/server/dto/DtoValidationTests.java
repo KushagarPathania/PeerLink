@@ -91,10 +91,21 @@ class DtoValidationTests {
 
     @Test
     void sharedFileRegistrationValidatesMetadata() {
-        UUID peerId = UUID.randomUUID();
-        assertThat(violatedFields(new SharedFileRegistrationRequest(peerId, "a.txt", 0L, CHECKSUM, null, 1024))).isEmpty();
-        assertThat(violatedFields(new SharedFileRegistrationRequest(null, "../a.txt", -1L, "xyz", null, 0)))
-                .containsExactlyInAnyOrder("sourcePeerId", "fileName", "fileSizeBytes", "sha256Checksum", "chunkSizeBytes");
+        assertThat(violatedFields(new SharedFileRegistrationRequest("a.txt", 0L, CHECKSUM, null, 65536))).isEmpty();
+        assertThat(violatedFields(new SharedFileRegistrationRequest("../a.txt", -1L, "xyz", "text/plain\n", 0)))
+                .containsExactlyInAnyOrder("fileName", "fileSizeBytes", "sha256Checksum", "contentType", "chunkSizeBytes");
+    }
+
+    @Test
+    void sharedFileChunkSizeMustBeWithinTheTransferProtocolLimits() {
+        for (int supported : new int[] {4096, 65536}) {
+            assertThat(violatedFields(new SharedFileRegistrationRequest("a.txt", 1L, CHECKSUM, null, supported))).isEmpty();
+        }
+        // 8 and 16 bytes used to stall transfers; 1 MiB never fitted a data frame.
+        for (int unsupported : new int[] {1, 8, 16, 4095, 65537, 1024 * 1024}) {
+            assertThat(violatedFields(new SharedFileRegistrationRequest("a.txt", 1L, CHECKSUM, null, unsupported)))
+                    .as("chunk size %d", unsupported).containsExactly("chunkSizeBytes");
+        }
     }
 
     @Test

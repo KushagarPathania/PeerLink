@@ -154,6 +154,7 @@ class WebAuthIntegrationTests extends WebIntegrationTestSupport {
                 .doesNotContain(user.getPasswordHash()).doesNotContain("$2a$");
         // Peer management is rendered client-side from the API; the page carries the CSRF token for it.
         assertThat(html).contains("id=\"devicesTable\"").contains("id=\"onlineList\"")
+                .contains("id=\"mySharesList\"").contains("id=\"sharedWithMeList\"").contains("id=\"transfersTable\"")
                 .contains("/js/dashboard.js").contains("name=\"_csrf_header\"");
     }
 

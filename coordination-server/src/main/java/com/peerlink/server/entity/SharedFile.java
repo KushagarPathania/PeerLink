@@ -30,6 +30,13 @@ public class SharedFile extends BaseEntity {
     public static final String FILE_NAME_PATTERN = "^(?!\\.{1,2}$)[^/\\\\\\p{Cntrl}]+$";
     public static final String SHA256_PATTERN = "^[0-9a-f]{64}$";
     public static final int FILE_NAME_MAX_LENGTH = 255;
+    /**
+     * Chunk sizes agents may register for peer-to-peer transfer (4 KiB to 64 KiB, the PeerLink
+     * protocol's data frame limit). Enforced when a file is registered; the stored range below is
+     * wider only because it predates file transfer (V2 schema).
+     */
+    public static final int MIN_TRANSFER_CHUNK_SIZE_BYTES = 4 * 1024;
+    public static final int MAX_TRANSFER_CHUNK_SIZE_BYTES = 64 * 1024;
     public static final int MAX_CHUNK_SIZE_BYTES = 16 * 1024 * 1024;
 
     @NotNull

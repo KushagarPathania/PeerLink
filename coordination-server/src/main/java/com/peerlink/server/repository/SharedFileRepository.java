@@ -9,6 +9,7 @@ import java.util.Optional;
 import java.util.UUID;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -22,6 +23,15 @@ public interface SharedFileRepository extends JpaRepository<SharedFile, UUID> {
     List<SharedFile> findByOwnerAndFileName(User owner, String fileName);
 
     List<SharedFile> findBySourcePeer(Peer sourcePeer);
+
+    Optional<SharedFile> findFirstBySourcePeerIdAndFileNameAndSha256ChecksumAndFileSizeBytesAndAvailableTrue(
+            UUID sourcePeerId, String fileName, String sha256Checksum, long fileSizeBytes);
+
+    @EntityGraph(attributePaths = {"owner", "sourcePeer"})
+    Page<SharedFile> findByOwnerIdAndAvailableTrue(UUID ownerId, Pageable pageable);
+
+    @EntityGraph(attributePaths = {"owner", "sourcePeer"})
+    Optional<SharedFile> findByIdAndOwnerId(UUID id, UUID ownerId);
 
     /** Looks a file up only if it belongs to the given owner, for ownership checks. */
     Optional<SharedFile> findByIdAndOwner(UUID id, User owner);

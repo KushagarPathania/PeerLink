@@ -208,4 +208,50 @@ class AgentConfigTests {
                 .isThrownBy(() -> AgentConfig.resolve(new String[] {"--connect-to=" + PEER_ID}, env))
                 .withMessageContaining("another peer");
     }
+
+    @Test
+    void transferSettingsHaveSafeDefaults() {
+        AgentConfig config = AgentConfig.resolve(NO_ARGS, Map.of());
+
+        assertThat(config.maxFileSizeBytes()).isEqualTo(1024L * 1024 * 1024);
+        assertThat(config.maxTransfers()).isEqualTo(2);
+        assertThat(config.dataDirectory()).isAbsolute().endsWithRaw(Path.of("PeerLink", "agent"));
+        assertThat(config.sharePath()).isNull();
+    }
+
+    @Test
+    void parsesHumanReadableFileSizes() {
+        assertThat(AgentConfig.parseSize("max-file-size", "1048576")).isEqualTo(1L << 20);
+        assertThat(AgentConfig.parseSize("max-file-size", "500MiB")).isEqualTo(500L << 20);
+        assertThat(AgentConfig.parseSize("max-file-size", "2g")).isEqualTo(2L << 30);
+        assertThat(AgentConfig.parseSize("max-file-size", "64 KB")).isEqualTo(64L << 10);
+        assertThatIllegalArgumentException().isThrownBy(() -> AgentConfig.parseSize("max-file-size", "-1"));
+        assertThatIllegalArgumentException().isThrownBy(() -> AgentConfig.parseSize("max-file-size", "1TB"));
+        assertThatIllegalArgumentException().isThrownBy(() -> AgentConfig.parseSize("max-file-size", "9999999999999G"));
+    }
+
+    @Test
+    void readsTransferSettingsFromEnvironmentAndCommandLine() {
+        AgentConfig config = AgentConfig.resolve(new String[] {"--max-transfers=4", "--data-dir=/tmp/peerlink-data"},
+                Map.of(AgentConfig.ENV_MAX_FILE_SIZE, "10MiB"));
+
+        assertThat(config.maxTransfers()).isEqualTo(4);
+        assertThat(config.maxFileSizeBytes()).isEqualTo(10L << 20);
+        assertThat(config.dataDirectory()).isEqualTo(Path.of("/tmp/peerlink-data"));
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> AgentConfig.resolve(new String[] {"--max-transfers=0"}, Map.of()));
+    }
+
+    @Test
+    void shareRequiresOwnPeerAndCannotBeCombinedWithConnectionTest() {
+        Map<String, String> env = Map.of(AgentConfig.ENV_PEER_ID, PEER_ID, AgentConfig.ENV_CREDENTIAL, CREDENTIAL);
+
+        assertThat(AgentConfig.resolve(new String[] {"--share=report.pdf"}, env).sharePath()).isEqualTo(Path.of("report.pdf"));
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> AgentConfig.resolve(new String[] {"--share=report.pdf"}, Map.of()))
+                .withMessageContaining("peer id");
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> AgentConfig.resolve(new String[] {"--share=a", "--connect-to=" + UUID.randomUUID()}, env))
+                .withMessageContaining("cannot be combined");
+    }
 }

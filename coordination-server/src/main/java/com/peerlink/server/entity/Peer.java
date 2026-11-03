@@ -68,6 +68,10 @@ public class Peer extends BaseEntity {
     @Column(name = "credential_issued_at")
     private Instant credentialIssuedAt;
 
+    /** SHA-256 fingerprint of the TLS certificate the peer's listener currently presents. */
+    @Column(name = "tls_certificate_sha256", length = 64)
+    private String tlsCertificateSha256;
+
     @UpdateTimestamp
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
@@ -114,6 +118,15 @@ public class Peer extends BaseEntity {
         this.credentialHash = null;
         this.credentialIssuedAt = null;
         markOffline();
+    }
+
+    /** Set from the agent's authenticated heartbeat; the agent generates a new key pair per process. */
+    public void updateTlsCertificate(String sha256Fingerprint) {
+        this.tlsCertificateSha256 = sha256Fingerprint;
+    }
+
+    public String getTlsCertificateSha256() {
+        return tlsCertificateSha256;
     }
 
     public boolean hasActiveCredential() {

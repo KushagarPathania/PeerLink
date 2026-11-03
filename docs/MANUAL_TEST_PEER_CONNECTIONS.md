@@ -1,4 +1,7 @@
-# Manual test: direct peer connections (Phase 5)
+# Manual test: direct peer connections
+
+Since Phase 6 every peer connection is mutually authenticated TLS 1.3 (protocol v2). For file
+transfers, see [MANUAL_TEST_FILE_TRANSFER.md](MANUAL_TEST_FILE_TRANSFER.md).
 
 This walkthrough starts two peer agents and tests a direct TCP connection between them. Part A
 uses one machine. Part B repeats the test across two devices on a LAN.
@@ -80,7 +83,7 @@ echo "exit code: $?"
 ### 6. Verify the handshake succeeded
 
 - **Test terminal:** `Connection test succeeded: Connected to peer <B> at 127.0.0.1:9302 using
-  protocol v1 (round trip … ms)`, with exit code `0`.
+  protocol v2 over TLS 1.3 (round trip … ms)`, with exit code `0`.
 - **Agent B:** `Accepted connection from peer <A> (device "alice-laptop" of alice) at
   /127.0.0.1:<port>`, then `… closed the connection`.
 - **Server log:** three audit lines:
@@ -104,8 +107,9 @@ echo "exit code: $?"
 
 - **Agent B's log:** the remote address of the accepted connection is the initiator's address
   and ephemeral port, never the server's port 8080.
-- **Optional packet capture:** run `sudo tcpdump -i lo0 -n 'tcp port 9302'` (`-i lo` on Linux)
-  during step 5. Packets flow only between the two agents.
+- **Optional packet capture:** run `sudo tcpdump -i lo0 -n -X 'tcp port 9302'` (`-i lo` on Linux)
+  during step 5. Packets flow only between the two agents, and their content is TLS-encrypted
+  (no readable `type=HELLO`).
 - **Server log:** it only ever contains ticket metadata, never message content.
 
 ### 8. Test invalid authorization and failures
@@ -114,22 +118,13 @@ echo "exit code: $?"
 |---|---|---|
 | Unknown or offline target | `--connect-to=00000000-0000-4000-8000-000000000000` | `TARGET_UNAVAILABLE`, exit `4` |
 | Target agent stopped | stop agent B, wait about 60 s until it is offline, then retry step 5 | `TARGET_UNAVAILABLE` (exit `4`). Within those ~60 s the peer still looks online: `CONNECT_FAILED` (exit `4`). |
-| Forged ticket | send a `HELLO` with a made-up `plt_…` ticket (script below) | `type=REJECT reason=UNAUTHORIZED` |
-| Not PeerLink | `printf 'GET / HTTP/1.1\r\n\r\n' \| nc 127.0.0.1 9302` | a `REJECT` frame (`reason=MALFORMED`), then closed |
+| Plaintext / not PeerLink | `printf 'GET / HTTP/1.1\r\n\r\n' \| nc 127.0.0.1 9302 \| xxd` | a TLS alert record (`15 03 03 …`), then closed; agent B logs `TLS with … failed: Unsupported or unrecognized SSL message` |
+| TLS without a client certificate | `echo \| openssl s_client -connect 127.0.0.1:9302 -tls1_3 -alpn peerlink/2` | agent B logs `TLS with … failed: (certificate_required) Empty client certificate chain` |
 | Revoked credential | revoke `alice-laptop`'s credential on the dashboard, rerun step 5 | `CREDENTIAL_REJECTED`, exit `3`; agent A also stops with exit `3` |
 
-Forged-ticket script (it uses a made-up ticket, so there is no secret involved):
-
-```bash
-python3 - <<'PY'
-import socket, struct
-s = socket.create_connection(("127.0.0.1", 9302), timeout=10)
-body = b"type=HELLO\nversions=1\npeerId=7cb33355-9512-4efd-a86b-4272a1f31e96\nticket=plt_" + b"F" * 43 + b"\n"
-s.sendall(b"PLNK" + struct.pack(">I", len(body)) + body)
-n = struct.unpack(">I", s.recv(4))[0]
-print(s.recv(n).decode())
-PY
-```
+Forged, replayed, expired or misdirected tickets, impostor responders and stolen tickets used
+with another TLS key all need a crafted TLS client. They are covered by the automated tests in
+`peer-agent/src/test/java/com/peerlink/agent/networking/PeerConnectionTests.java`.
 
 After any of these, a normal connection test (step 5) still succeeds. The listener keeps running.
 

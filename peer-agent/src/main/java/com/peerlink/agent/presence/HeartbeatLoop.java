@@ -34,6 +34,7 @@ public final class HeartbeatLoop implements AutoCloseable {
     private final BackoffPolicy backoff;
     private final ScheduledExecutorService executor;
     private final Integer listeningPort;
+    private final String tlsCertificateSha256;
     private final CompletableFuture<StopReason> stopped = new CompletableFuture<>();
 
     // Only touched on the executor thread.
@@ -42,13 +43,18 @@ public final class HeartbeatLoop implements AutoCloseable {
 
     public HeartbeatLoop(PresenceClient client, UUID peerId, AgentCredential credential, Duration interval,
                          BackoffPolicy backoff, ScheduledExecutorService executor) {
-        this(client, peerId, credential, interval, backoff, executor, null);
+        this(client, peerId, credential, interval, backoff, executor, null, null);
     }
 
-    /** @param listeningPort reported with every heartbeat, or {@code null} if this agent runs no listener */
+    /**
+     * @param listeningPort        reported with every heartbeat, or {@code null} if this agent runs no listener
+     * @param tlsCertificateSha256 fingerprint of the listener's TLS certificate, reported with it
+     */
     public HeartbeatLoop(PresenceClient client, UUID peerId, AgentCredential credential, Duration interval,
-                         BackoffPolicy backoff, ScheduledExecutorService executor, Integer listeningPort) {
+                         BackoffPolicy backoff, ScheduledExecutorService executor, Integer listeningPort,
+                         String tlsCertificateSha256) {
         this.listeningPort = listeningPort;
+        this.tlsCertificateSha256 = tlsCertificateSha256;
         this.client = Objects.requireNonNull(client);
         this.peerId = Objects.requireNonNull(peerId);
         this.credential = Objects.requireNonNull(credential);
@@ -109,7 +115,7 @@ public final class HeartbeatLoop implements AutoCloseable {
         }
         Duration next = interval;
         try {
-            HeartbeatResult result = client.sendHeartbeat(peerId, credential, listeningPort);
+            HeartbeatResult result = client.sendHeartbeat(peerId, credential, listeningPort, tlsCertificateSha256);
             switch (result.outcome()) {
                 case ACCEPTED -> onAccepted(result);
                 case REJECTED -> {
